@@ -5,7 +5,8 @@ type Account = { id: string; name: string; accountType: string; balanceCents: nu
 type LedgerEntry = { id: string; transactionDate: string; description: string; accountName: string; amountCents: number };
 type DashboardData = { incomeCents: number; spendingCents: number; accounts: Account[]; recentTransactions: LedgerEntry[] };
 type LedgerData = { transactions: LedgerEntry[] };
-type View = "dashboard" | "ledger" | "calendar";
+type Schedule = { id: string; startDate: string; description: string; amountCents: number; recurrence: string; accountName: string };
+type View = "dashboard" | "ledger" | "calendar" | "scheduled";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const formatMoney = (cents: number) => money.format(cents / 100);
@@ -17,14 +18,15 @@ function Widget({ title, children, className = "" }: { title: string; children: 
 export function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"account" | "transaction" | null>(null);
+  const [dialog, setDialog] = useState<"account" | "transaction" | "schedule" | null>(null);
   const [view, setView] = useState<View>("dashboard");
   const [ledger, setLedger] = useState<LedgerData | null>(null);
   const [calendarMonth, setCalendarMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
 
   const refresh = useCallback(() => { void invoke<DashboardData>("dashboard_data").then(setDashboard).catch((reason: unknown) => setError(String(reason))); }, []);
   useEffect(refresh, [refresh]);
-  useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); }, [view]);
+  useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); if (view === "scheduled") void invoke<Schedule[]>("scheduled_data").then(setSchedules).catch((reason: unknown) => setError(String(reason))); }, [view]);
 
   const netWorth = useMemo(() => dashboard?.accounts.reduce((total, account) => total + account.balanceCents, 0) ?? 0, [dashboard]);
 
@@ -35,11 +37,11 @@ export function App() {
       <button className={`nav-button ${view === "calendar" ? "selected" : ""}`} onClick={() => setView("calendar")} aria-label="Calendar">□</button>
       <button className={`nav-button ${view === "ledger" ? "selected" : ""}`} onClick={() => setView("ledger")} aria-label="Ledger">☷</button>
       <button className="nav-button" aria-label="Accounts">◎</button>
-      <button className="nav-button" aria-label="Scheduled transactions">⌁</button>
+      <button className={`nav-button ${view === "scheduled" ? "selected" : ""}`} onClick={() => setView("scheduled")} aria-label="Scheduled transactions">⌁</button>
       <button className="nav-button" aria-label="AI workspace">AI</button>
     </aside>
     <section className="page">
-      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" ? "PLANNING" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : "Ledger"}</h1></div><button className="primary-action" onClick={() => setDialog("transaction")}>Add transaction</button></header>
+      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" ? "PLANNING" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : "Ledger"}</h1></div><button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : "transaction")}>{view === "scheduled" ? "Add schedule" : "Add transaction"}</button></header>
       {error ? <p className="status error">Local data store unavailable: {error}</p> : null}
       {!dashboard && !error ? <p className="status">Opening encrypted local data store...</p> : null}
       {dashboard && view === "dashboard" ? <div className="dashboard-grid">
@@ -64,8 +66,10 @@ export function App() {
       </div> : null}
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} /> : null}
       {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} onMonthChange={setCalendarMonth} /> : null}
+      {view === "scheduled" ? <Scheduled schedules={schedules} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
       {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
+      {dialog === "schedule" ? <ScheduleDialog accounts={dashboard?.accounts ?? []} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); setView("scheduled"); }} /> : null}
     </section>
   </main>;
 }
@@ -73,6 +77,8 @@ export function App() {
 function Ledger({ transactions }: { transactions: LedgerEntry[] }) {
   return <section className="ledger-widget"><div className="ledger-toolbar"><input aria-label="Search transactions" placeholder="Search transactions" /><span>{transactions.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span></div>{transactions.length === 0 ? <p className="empty-copy">Your ledger is empty.</p> : transactions.map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><strong>{item.description}</strong><span>{item.accountName}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div></section>;
 }
+
+function Scheduled({ schedules }: { schedules: Schedule[] }) { return <section className="ledger-widget"><div className="ledger-head"><span>Starts</span><span>Description</span><span>Account</span><span>Amount</span></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.startDate}<small>{item.recurrence}</small></span><strong>{item.description}</strong><span>{item.accountName}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</section>; }
 
 function Calendar({ month, transactions, onMonthChange }: { month: Date; transactions: LedgerEntry[]; onMonthChange: (month: Date) => void }) {
   const [selected, setSelected] = useState<string | null>(null);
@@ -103,4 +109,10 @@ function TransactionDialog({ accounts, onClose, onSaved }: { accounts: Account[]
     catch (reason) { setError(String(reason)); }
   }
   return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>Add transaction</h2><button type="button" onClick={onClose}>×</button></header>{accounts.length === 0 ? <p className="empty-copy">Create an account first.</p> : <><label>Account<select name="accountId" required>{accounts.map(account => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label><label>Date<input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label><label>Description<input name="description" required placeholder="Groceries" /></label><label>Amount<input name="amount" type="number" step="0.01" required placeholder="-48.20" /></label><label>Notes<textarea name="notes" rows={3} /></label></>}{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button>{accounts.length > 0 ? <button className="primary-action" type="submit">Save transaction</button> : null}</footer></form></div>;
+}
+
+function ScheduleDialog({ accounts, onClose, onSaved }: { accounts: Account[]; onClose: () => void; onSaved: () => void }) {
+  const [error, setError] = useState<string | null>(null);
+  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); try { await invoke("create_schedule", { input: { accountId: form.get("accountId"), startDate: form.get("date"), description: form.get("description"), amountCents: Math.round(Number(form.get("amount")) * 100), recurrence: form.get("recurrence") } }); onSaved(); } catch (reason) { setError(String(reason)); } }
+  return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>Add scheduled transaction</h2><button type="button" onClick={onClose}>×</button></header>{accounts.length === 0 ? <p className="empty-copy">Create an account first.</p> : <><label>Account<select name="accountId">{accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label><label>Starts<input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} /></label><label>Description<input name="description" required /></label><label>Amount<input name="amount" type="number" step="0.01" required /></label><label>Repeats<select name="recurrence"><option value="monthly">Monthly</option><option value="weekly">Weekly</option></select></label></>}{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button>{accounts.length > 0 ? <button className="primary-action" type="submit">Save schedule</button> : null}</footer></form></div>;
 }
