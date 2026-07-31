@@ -155,6 +155,25 @@ export default {
       }
     }
 
+    // Sandbox Link token creation is intentionally isolated from the real
+    // connection flow. It never exchanges or persists an Item token.
+    if (request.method === "POST" && url.pathname === "/v1/sandbox/link-token") {
+      const configFailure = requirePlaid(env);
+      if (configFailure) return configFailure;
+      try {
+        const result = await plaidPost(env, "/link/token/create", {
+          client_name: "Family Finance Sandbox",
+          language: "en",
+          country_codes: ["US"],
+          products: ["transactions"],
+          user: { client_user_id: `sandbox-${crypto.randomUUID()}` }
+        });
+        return json({ linkToken: result.link_token, expiration: result.expiration });
+      } catch {
+        return problem(502, "plaid_sandbox_error", "Plaid Sandbox did not create a Link token.");
+      }
+    }
+
     const authFailure = authorize(request, env);
     if (authFailure) {
       return authFailure;
