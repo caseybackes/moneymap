@@ -6,7 +6,7 @@ type Account = { id: string; name: string; accountType: string; balanceCents: nu
 type LedgerEntry = { id: string; transactionDate: string; description: string; accountName: string; amountCents: number };
 type DashboardData = { incomeCents: number; spendingCents: number; accounts: Account[]; recentTransactions: LedgerEntry[] };
 type LedgerData = { transactions: LedgerEntry[] };
-type Schedule = { id: string; startDate: string; description: string; amountCents: number; recurrence: string; accountName: string };
+type Schedule = { id: string; accountId: string; startDate: string; nextOccurrence: string; description: string; amountCents: number; recurrence: string; accountName: string };
 type SandboxLinkSession = { linkToken: string; sessionId: string; sessionSecret: string; expiration: string };
 type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts";
 
@@ -25,6 +25,7 @@ export function App() {
   const [ledger, setLedger] = useState<LedgerData | null>(null);
   const [calendarMonth, setCalendarMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
   const [importing, setImporting] = useState(false);
   const [rangeMonths, setRangeMonths] = useState<number | null>(1);
 
@@ -75,11 +76,11 @@ export function App() {
       </div> : null}
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} onMonthChange={setCalendarMonth} /> : null}
-      {view === "scheduled" ? <Scheduled schedules={schedules} /> : null}
+      {view === "scheduled" ? <Scheduled schedules={schedules} onEdit={(schedule) => { setEditingSchedule(schedule); setDialog("schedule"); }} onChanged={() => { refresh(); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
       {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} onAdd={() => setDialog("account")} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
       {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
-      {dialog === "schedule" ? <ScheduleDialog accounts={dashboard?.accounts ?? []} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); setView("scheduled"); }} /> : null}
+      {dialog === "schedule" ? <ScheduleDialog accounts={dashboard?.accounts ?? []} schedule={editingSchedule} onClose={() => { setDialog(null); setEditingSchedule(null); }} onSaved={() => { setDialog(null); setEditingSchedule(null); setView("scheduled"); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
     </section>
   </main>;
 }
@@ -90,7 +91,19 @@ function Ledger({ transactions, onDeleted }: { transactions: LedgerEntry[]; onDe
   return <section className="ledger-widget"><div className="ledger-toolbar"><input aria-label="Search transactions" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search name, account, or amount" /><span>{filtered.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span></div>{filtered.length === 0 ? <p className="empty-copy">No matching transactions.</p> : filtered.map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><strong>{item.description}</strong><span>{item.accountName}</span><span className="ledger-amount"><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong><button onClick={() => void remove(item)}>Delete</button></span></div>)}</div></section>;
 }
 
-function Scheduled({ schedules }: { schedules: Schedule[] }) { return <section className="ledger-widget"><div className="ledger-head"><span>Starts</span><span>Description</span><span>Account</span><span>Amount</span></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.startDate}<small>{item.recurrence}</small></span><strong>{item.description}</strong><span>{item.accountName}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</section>; }
+function Scheduled({ schedules, onEdit, onChanged }: { schedules: Schedule[]; onEdit: (schedule: Schedule) => void; onChanged: () => void }) {
+  const [processing, setProcessing] = useState<string | null>(null);
+  const [status, setStatus] = useState<Record<string, string>>({});
+  async function process(item: Schedule, operation: "record" | "skip") {
+    setProcessing(`${operation}:${item.id}`);
+    try {
+      const occurrence = await invoke<string>(operation === "record" ? "record_schedule_occurrence" : "skip_schedule_occurrence", { scheduleId: item.id });
+      setStatus(current => ({ ...current, [item.id]: operation === "record" ? `Recorded ${occurrence}` : `Skipped ${occurrence}` }));
+      onChanged();
+    } finally { setProcessing(null); }
+  }
+  return <section className="ledger-widget scheduled-widget"><div className="ledger-head"><span>Next occurrence</span><span>Description</span><span>Account</span><span>Amount & actions</span></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.nextOccurrence}<small>{item.recurrence} · starts {item.startDate}</small></span><strong>{item.description}</strong><span>{item.accountName}</span><span className="schedule-actions"><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong><div><button onClick={() => onEdit(item)}>Edit</button><button disabled={processing !== null} onClick={() => void process(item, "skip")}>{processing === `skip:${item.id}` ? "Skipping…" : "Skip"}</button><button className="primary-action" disabled={processing !== null} onClick={() => void process(item, "record")}>{processing === `record:${item.id}` ? "Recording…" : "Record"}</button></div>{status[item.id] ? <small className="schedule-status">{status[item.id]}</small> : null}</span></div>)}</section>;
+}
 
 function Accounts({ accounts, onAdd }: { accounts: Account[]; onAdd: () => void }) { return <section className="ledger-widget accounts-page"><div className="account-grid">{accounts.map(account => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong></article>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Manual account or balance tracking</small></button><SandboxLinkButton onImported={() => window.location.reload()} /></div></section>; }
 
@@ -158,8 +171,8 @@ function TransactionDialog({ accounts, onClose, onSaved }: { accounts: Account[]
   return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>Add transaction</h2><button type="button" onClick={onClose}>×</button></header>{accounts.length === 0 ? <p className="empty-copy">Create an account first.</p> : <><label>Account<select name="accountId" required>{accounts.map(account => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label><label>Date<input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label><label>Description<input name="description" required placeholder="Groceries" /></label><label>Amount<input name="amount" type="number" step="0.01" required placeholder="-48.20" /></label><label>Notes<textarea name="notes" rows={3} /></label></>}{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button>{accounts.length > 0 ? <button className="primary-action" type="submit">Save transaction</button> : null}</footer></form></div>;
 }
 
-function ScheduleDialog({ accounts, onClose, onSaved }: { accounts: Account[]; onClose: () => void; onSaved: () => void }) {
+function ScheduleDialog({ accounts, schedule, onClose, onSaved }: { accounts: Account[]; schedule: Schedule | null; onClose: () => void; onSaved: () => void }) {
   const [error, setError] = useState<string | null>(null);
-  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); try { await invoke("create_schedule", { input: { accountId: form.get("accountId"), startDate: form.get("date"), description: form.get("description"), amountCents: Math.round(Number(form.get("amount")) * 100), recurrence: form.get("recurrence") } }); onSaved(); } catch (reason) { setError(String(reason)); } }
-  return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>Add scheduled transaction</h2><button type="button" onClick={onClose}>×</button></header>{accounts.length === 0 ? <p className="empty-copy">Create an account first.</p> : <><label>Account<select name="accountId">{accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label><label>Starts<input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} /></label><label>Description<input name="description" required /></label><label>Amount<input name="amount" type="number" step="0.01" required /></label><label>Repeats<select name="recurrence"><option value="monthly">Monthly</option><option value="weekly">Weekly</option></select></label></>}{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button>{accounts.length > 0 ? <button className="primary-action" type="submit">Save schedule</button> : null}</footer></form></div>;
+  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); const input = { accountId: form.get("accountId"), startDate: form.get("date"), description: form.get("description"), amountCents: Math.round(Number(form.get("amount")) * 100), recurrence: form.get("recurrence") }; try { if (schedule) await invoke("update_schedule", { input: { id: schedule.id, ...input } }); else await invoke("create_schedule", { input }); onSaved(); } catch (reason) { setError(String(reason)); } }
+  return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>{schedule ? "Edit scheduled transaction" : "Add scheduled transaction"}</h2><button type="button" onClick={onClose}>×</button></header>{accounts.length === 0 ? <p className="empty-copy">Create an account first.</p> : <><label>Account<select name="accountId" defaultValue={schedule?.accountId}>{accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label><label>Starts<input name="date" type="date" defaultValue={schedule?.startDate ?? new Date().toISOString().slice(0, 10)} /></label><label>Description<input name="description" required defaultValue={schedule?.description} /></label><label>Amount<input name="amount" type="number" step="0.01" required defaultValue={schedule ? (schedule.amountCents / 100).toFixed(2) : undefined} /></label><label>Repeats<select name="recurrence" defaultValue={schedule?.recurrence ?? "monthly"}><option value="monthly">Monthly</option><option value="weekly">Weekly</option></select></label></>}{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button>{accounts.length > 0 ? <button className="primary-action" type="submit">{schedule ? "Save changes" : "Save schedule"}</button> : null}</footer></form></div>;
 }

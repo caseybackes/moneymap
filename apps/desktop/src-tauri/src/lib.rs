@@ -56,7 +56,7 @@ struct LedgerData {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ScheduledEntry { id: String, start_date: String, description: String, amount_cents: i64, recurrence: String, account_name: String }
+struct ScheduledEntry { id: String, account_id: String, start_date: String, next_occurrence: String, description: String, amount_cents: i64, recurrence: String, account_name: String }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,6 +99,10 @@ struct CreateTransactionInput {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateScheduleInput { account_id: String, start_date: String, description: String, amount_cents: i64, recurrence: String }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateScheduleInput { id: String, account_id: String, start_date: String, description: String, amount_cents: i64, recurrence: String }
 
 fn new_id() -> String {
     let mut bytes = [0_u8; 16];
@@ -187,6 +191,15 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
     ).map_err(|error| error.to_string())?;
     if !has_reported_balance {
         connection.execute_batch("ALTER TABLE accounts ADD COLUMN reported_balance_cents INTEGER; INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);")
+            .map_err(|error| error.to_string())?;
+    }
+    let has_schedule_progress: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('scheduled_transactions') WHERE name = 'last_processed_occurrence')",
+        [],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !has_schedule_progress {
+        connection.execute_batch("ALTER TABLE scheduled_transactions ADD COLUMN last_processed_occurrence TEXT; INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);")
             .map_err(|error| error.to_string())?;
     }
     Ok((connection, path.display().to_string()))
@@ -297,9 +310,13 @@ fn ledger_data(app: AppHandle) -> Result<LedgerData, String> {
 #[tauri::command]
 fn scheduled_data(app: AppHandle) -> Result<Vec<ScheduledEntry>, String> {
     let (connection, _) = open_database(&app)?;
-    let mut statement = connection.prepare("SELECT s.id, s.start_date, s.description, s.amount_cents, s.recurrence, a.name FROM scheduled_transactions s JOIN accounts a ON a.id = s.account_id WHERE s.active = 1 ORDER BY s.start_date, s.description")
+    let mut statement = connection.prepare("SELECT s.id, s.account_id, s.start_date,
+      CASE s.recurrence WHEN 'weekly' THEN date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-7 days')), '+7 days')
+                        ELSE date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-1 month')), '+1 month') END,
+      s.description, s.amount_cents, s.recurrence, a.name
+      FROM scheduled_transactions s JOIN accounts a ON a.id = s.account_id WHERE s.active = 1 ORDER BY 4, s.description")
         .map_err(|error| error.to_string())?;
-    let rows = statement.query_map([], |row| Ok(ScheduledEntry { id: row.get(0)?, start_date: row.get(1)?, description: row.get(2)?, amount_cents: row.get(3)?, recurrence: row.get(4)?, account_name: row.get(5)? }))
+    let rows = statement.query_map([], |row| Ok(ScheduledEntry { id: row.get(0)?, account_id: row.get(1)?, start_date: row.get(2)?, next_occurrence: row.get(3)?, description: row.get(4)?, amount_cents: row.get(5)?, recurrence: row.get(6)?, account_name: row.get(7)? }))
         .map_err(|error| error.to_string())?;
     let entries = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
     Ok(entries)
@@ -314,6 +331,54 @@ fn create_schedule(app: AppHandle, input: CreateScheduleInput) -> Result<String,
     connection.execute("INSERT INTO scheduled_transactions(id, account_id, start_date, description, amount_cents, recurrence) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", (&id, input.account_id, input.start_date, input.description.trim(), input.amount_cents, input.recurrence))
         .map_err(|error| error.to_string())?;
     Ok(id)
+}
+
+#[tauri::command]
+fn update_schedule(app: AppHandle, input: UpdateScheduleInput) -> Result<(), String> {
+    if input.description.trim().is_empty() { return Err("A scheduled transaction description is required.".into()); }
+    if !matches!(input.recurrence.as_str(), "weekly" | "monthly") { return Err("Choose weekly or monthly.".into()); }
+    let (connection, _) = open_database(&app)?;
+    let updated = connection.execute(
+        "UPDATE scheduled_transactions SET account_id = ?1, start_date = ?2, description = ?3, amount_cents = ?4, recurrence = ?5 WHERE id = ?6",
+        (&input.account_id, &input.start_date, input.description.trim(), input.amount_cents, &input.recurrence, &input.id),
+    ).map_err(|error| error.to_string())?;
+    if updated != 1 { return Err("Scheduled transaction no longer exists.".into()); }
+    Ok(())
+}
+
+fn process_schedule(app: AppHandle, schedule_id: String, record: bool) -> Result<String, String> {
+    let (connection, _) = open_database(&app)?;
+    let schedule: Option<(String, String, String, i64, String)> = connection.query_row(
+        "SELECT account_id,
+          CASE recurrence WHEN 'weekly' THEN date(COALESCE(last_processed_occurrence, date(start_date, '-7 days')), '+7 days')
+                            ELSE date(COALESCE(last_processed_occurrence, date(start_date, '-1 month')), '+1 month') END,
+          description, amount_cents, recurrence
+          FROM scheduled_transactions WHERE id = ?1 AND active = 1",
+        [&schedule_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    let Some((account_id, occurrence, description, amount_cents, _)) = schedule else { return Err("Scheduled transaction no longer exists.".into()); };
+    let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
+    if record {
+        transaction.execute(
+            "INSERT INTO transactions(id, account_id, transaction_date, description, amount_cents, source, notes) VALUES(?1, ?2, ?3, ?4, ?5, 'scheduled', 'Recorded from scheduled transaction')",
+            (new_id(), account_id, &occurrence, description, amount_cents),
+        ).map_err(|error| error.to_string())?;
+    }
+    transaction.execute("UPDATE scheduled_transactions SET last_processed_occurrence = ?1 WHERE id = ?2", (&occurrence, &schedule_id))
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(occurrence)
+}
+
+#[tauri::command]
+fn record_schedule_occurrence(app: AppHandle, schedule_id: String) -> Result<String, String> {
+    process_schedule(app, schedule_id, true)
+}
+
+#[tauri::command]
+fn skip_schedule_occurrence(app: AppHandle, schedule_id: String) -> Result<String, String> {
+    process_schedule(app, schedule_id, false)
 }
 
 fn broker_post(path: &str, body: Value, connection_secret: Option<&str>) -> Result<Value, String> {
@@ -467,7 +532,7 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, delete_transaction, ledger_data, scheduled_data, create_schedule, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, delete_transaction, ledger_data, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }
