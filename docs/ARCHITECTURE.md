@@ -36,7 +36,7 @@ tests/
 | ID | Decision | Status | Rationale |
 | --- | --- | --- | --- |
 | ADR-001 | Windows desktop first, Linux portability preserved | Accepted | Product requirement. |
-| ADR-002 | C#/.NET 10 + Avalonia UI | Accepted | Product-directed baseline for a native desktop executable on Windows and Linux. |
+| ADR-002 | React + Tauri desktop UI | Accepted | Component-based UI replaces the code-behind Avalonia shell while retaining a real Windows/Linux desktop executable. |
 | ADR-003 | SQLite local persistence | Accepted | Product-directed local-only data store. |
 | ADR-004 | `decimal` for money | Accepted | Prevents binary floating-point rounding errors in financial calculations. |
 | ADR-005 | Deterministic scenario engine | Accepted | Modeling results must be reproducible and independently testable. |
@@ -49,6 +49,7 @@ tests/
 | ADR-012 | Persist a manually posted transaction and its repeat schedule atomically | Accepted | Prevents partial recurrence setup and ensures the schedule begins after the already-posted occurrence. |
 | ADR-013 | Lock balance adjustments in the Ledger UI as as-of-date audit entries | Accepted | Preserves reconciliation evidence in the user workflow and computes adjustment amounts from the ledger state at the selected date. |
 | ADR-014 | Apply schema migrations atomically and show startup recovery information | Accepted | Prevents partial migration state and gives the user actionable information if local startup cannot complete. |
+| ADR-015 | Tauri local commands own the encrypted database boundary | Accepted | The React renderer never receives a database key or arbitrary SQL capability. SQLCipher protects the database; the random key is stored through the operating system credential store. |
 
 ## Deferred decisions
 

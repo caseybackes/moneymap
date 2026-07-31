@@ -18,6 +18,21 @@ scripts/
 docs/                      Product, architecture, milestones, release, and project records
 ```
 
+## React/Tauri migration
+
+The replacement desktop client is at `apps/desktop`. It is a React renderer with a Rust/Tauri local command layer. The command layer owns SQLCipher access and retrieves its per-install database key from the operating system credential store; the renderer cannot access the key or database file directly.
+
+```powershell
+cd apps/desktop
+npm install
+npm run build
+
+# In a shell where Rust/Cargo and Strawberry Perl are on PATH.
+npm run tauri dev
+```
+
+The existing Avalonia application remains the released behavioral reference until the React/Tauri client reaches feature parity. Do not migrate real-user data automatically during this stage.
+
 ## Local development commands
 
 The repository pins the SDK in `global.json`; `.tooling\dotnet\dotnet.exe` is used when available.

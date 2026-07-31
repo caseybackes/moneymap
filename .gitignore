@@ -1,6 +1,9 @@
 .tooling/
 .tooling-home/
 artifacts/
+apps/desktop/node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
 **/bin/
 **/obj/
 *.user
