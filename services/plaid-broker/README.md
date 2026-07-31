@@ -25,4 +25,13 @@ The worker binds a D1 database for encrypted token records and sync cursors. It 
 
 ## Sandbox test path
 
-`POST /v1/sandbox/bootstrap` creates a First Platypus Bank test connection using Plaid's `user_transactions_dynamic` persona. It consumes no Production Trial Item. `POST /v1/connections/{id}/sync` then returns its fake transaction changes. Both endpoints require the broker bearer token.
+The React/Tauri app uses the isolated Sandbox Link lifecycle:
+
+1. `POST /v1/sandbox/link-token` returns a short-lived Plaid Link token plus a one-time Sandbox session id and secret.
+2. Plaid Link returns a short-lived public token to the desktop app.
+3. `POST /v1/sandbox/link-complete` exchanges that public token at the broker, encrypts the resulting Plaid access token in D1, and returns a new per-connection key.
+4. `POST /v1/sandbox/connections/{id}/sync` requires `x-family-finance-connection-key` and returns account and transaction changes for that connection.
+
+The connection key is retained only in the encrypted desktop database. These routes are strictly Sandbox-only and do not authorize a real-bank Item.
+
+`POST /v1/sandbox/bootstrap` remains an authenticated developer fixture that creates First Platypus Bank records using Plaid's `user_transactions_dynamic` persona. It consumes no Production Trial Item.

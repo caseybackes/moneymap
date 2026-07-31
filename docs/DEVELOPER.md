@@ -33,6 +33,19 @@ npm run tauri dev
 
 The existing Avalonia application remains the released behavioral reference until the React/Tauri client reaches feature parity. Do not migrate real-user data automatically during this stage.
 
+### Current React/Tauri capabilities
+
+- SQLCipher local database at the Tauri app-local data directory; the database key is held in the OS credential store.
+- Dashboard, account cards, manual balance adjustments, ledger create/edit/delete/filter/pagination, calendar popover/swipe navigation, scheduled record/skip/edit, and numerical scenario modeling.
+- Sandbox Plaid Link only. The Cloudflare broker encrypts the Plaid access token and the desktop database stores a per-connection broker key inside SQLCipher. Do not test a real bank connection until the Sandbox Link flow has been manually verified and its review/disconnect lifecycle is complete.
+
+Use the bundled current Node runtime when the system Node version is too old for the Tauri/Wrangler toolchain:
+
+```powershell
+$node24 = 'C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
+& $node24 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js' run build
+```
+
 ## Local development commands
 
 The repository pins the SDK in `global.json`; `.tooling\dotnet\dotnet.exe` is used when available.
@@ -57,9 +70,9 @@ Development output is framework-dependent at `src\FamilyFinance.App\bin\Debug\ne
 
 ## Local data and constraints
 
-- The application database is local SQLite at `%LOCALAPPDATA%\FamilyFinance\family-finance.db`.
-- Financial data is local-first. There is no current bank connection, import path, telemetry, cloud storage, or AI provider call.
-- Use `decimal` for money. The ledger and deterministic Domain calculations are authoritative.
+- The Avalonia database remains at `%LOCALAPPDATA%\FamilyFinance\family-finance.db`; the React/Tauri database is a separate encrypted `family-finance-v2.db` in its app-local data directory. It is intentionally not migrated automatically.
+- Financial data is local-first. The sole remote service is the optional Cloudflare Plaid broker; it holds encrypted broker-side tokens and never holds the local database.
+- The React/Tauri app represents money as integer cents. Avoid JavaScript floating-point values at persistence boundaries.
 - Never put database files, tokens, generated release artifacts, or `.tooling` content into source control. These paths are ignored.
 - Current release validation has not proven first-run database initialization under an isolated Windows user profile; see R-007 in [PROJECT-LOG.md](PROJECT-LOG.md).
 

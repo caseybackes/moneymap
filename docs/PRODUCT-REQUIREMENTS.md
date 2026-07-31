@@ -53,15 +53,14 @@ Family Finance is an installed, local-first desktop application for one person t
 - Scenarios recalculate projected calendar totals, ledger entries, and balances.
 - Scenarios do not alter the real ledger.
 - AI analysis, when present, interprets calculated scenario results; it is not the scenario input interface.
-- The scenario/what-if UI is deferred. It remains product scope but does not block scheduled-transaction and balance-adjustment work.
+- The initial scenario UI supports structured monthly income, spending, contribution, one-time, and horizon inputs. Its projection remains isolated from the ledger. Calendar/ledger scenario overlays and AI analysis remain future work.
 
 ### Data and platform constraints
 
-- Financial data is stored locally only.
-- No external financial-data connection is in scope at this stage.
-- A future Plaid transaction-import connection is gated: it may use only an owner-controlled Plaid dashboard account, explicit user consent, encrypted token handling, and review before any imported transaction reaches the ledger.
-- The expected implementation stack is C#/.NET 10, Avalonia, and SQLite unless an architecture decision records a reason to change it.
-- Money calculations use `decimal`.
+- Financial data is stored locally in an encrypted SQLCipher database.
+- Sandbox Plaid Link is permitted for development. It uses an owner-controlled Plaid dashboard account, encrypted broker-side token handling, and encrypted local connection metadata. Real-bank connection remains gated on Sandbox verification, review-before-import, consent, and disconnect behavior.
+- The implementation stack is React, Tauri/Rust, SQLCipher, and an optional Cloudflare Worker Plaid broker; the legacy Avalonia app remains the behavioral reference during migration.
+- Money is persisted as integer cents.
 
 ## Explicitly out of scope for the foundation
 
@@ -73,5 +72,5 @@ Family Finance is an installed, local-first desktop application for one person t
 
 1. Dashboard information hierarchy and interactions beyond being the landing view.
 2. Category hierarchy beyond the initial flat preferred-category list.
-3. Scenario-editor interaction design and the first supported scenario inputs (deferred work).
-4. Local database encryption, backup/restore experience, and LLM data-sharing/privacy controls.
+3. Scenario overlays for calendar, ledger, and scheduled transactions; later AI analysis of a completed numerical scenario.
+4. Backup/restore experience and LLM data-sharing/privacy controls.
