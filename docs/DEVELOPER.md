@@ -39,6 +39,18 @@ The existing Avalonia application remains the released behavioral reference unti
 - Dashboard, account cards, manual balance adjustments, ledger create/edit/delete/filter/pagination, calendar popover/swipe navigation, scheduled record/skip/edit, and numerical scenario modeling.
 - Sandbox Plaid Link only. The Cloudflare broker encrypts the Plaid access token and the desktop database stores a per-connection broker key inside SQLCipher. Do not test a real bank connection until the Sandbox Link flow has been manually verified and its review/disconnect lifecycle is complete.
 
+### Required Sandbox Link validation
+
+Run this against the canonical development executable before any production or Trial Item is considered:
+
+1. In **Accounts**, choose **Connect Sandbox account** and complete the official Plaid Link window with a Sandbox institution.
+2. Confirm the returned account cards and transactions appear once; an older First Platypus fixture import must be adopted rather than duplicated.
+3. Use **Sync connected accounts** and confirm it completes without losing local manual entries.
+4. Confirm the connected institution is listed in Accounts, then use **Disconnect** and verify the local transaction history remains while future sync is unavailable.
+5. Restart the app and confirm the encrypted local database opens normally. This demonstrates that the desktop connection key survives only in the local encrypted store.
+
+Record the result in the project log before requesting or using a real-bank connection.
+
 Use the bundled current Node runtime when the system Node version is too old for the Tauri/Wrangler toolchain:
 
 ```powershell
