@@ -5,7 +5,7 @@ type Account = { id: string; name: string; accountType: string; balanceCents: nu
 type LedgerEntry = { id: string; transactionDate: string; description: string; accountName: string; amountCents: number };
 type DashboardData = { incomeCents: number; spendingCents: number; accounts: Account[]; recentTransactions: LedgerEntry[] };
 type LedgerData = { transactions: LedgerEntry[] };
-type View = "dashboard" | "ledger";
+type View = "dashboard" | "ledger" | "calendar";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const formatMoney = (cents: number) => money.format(cents / 100);
@@ -20,10 +20,11 @@ export function App() {
   const [dialog, setDialog] = useState<"account" | "transaction" | null>(null);
   const [view, setView] = useState<View>("dashboard");
   const [ledger, setLedger] = useState<LedgerData | null>(null);
+  const [calendarMonth, setCalendarMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
 
   const refresh = useCallback(() => { void invoke<DashboardData>("dashboard_data").then(setDashboard).catch((reason: unknown) => setError(String(reason))); }, []);
   useEffect(refresh, [refresh]);
-  useEffect(() => { if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); }, [view]);
+  useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); }, [view]);
 
   const netWorth = useMemo(() => dashboard?.accounts.reduce((total, account) => total + account.balanceCents, 0) ?? 0, [dashboard]);
 
@@ -31,14 +32,14 @@ export function App() {
     <aside className="rail" aria-label="Primary navigation">
       <div className="brand-mark">F</div>
       <button className={`nav-button ${view === "dashboard" ? "selected" : ""}`} onClick={() => setView("dashboard")} aria-label="Dashboard">▦</button>
-      <button className="nav-button" aria-label="Calendar">□</button>
+      <button className={`nav-button ${view === "calendar" ? "selected" : ""}`} onClick={() => setView("calendar")} aria-label="Calendar">□</button>
       <button className={`nav-button ${view === "ledger" ? "selected" : ""}`} onClick={() => setView("ledger")} aria-label="Ledger">☷</button>
       <button className="nav-button" aria-label="Accounts">◎</button>
       <button className="nav-button" aria-label="Scheduled transactions">⌁</button>
       <button className="nav-button" aria-label="AI workspace">AI</button>
     </aside>
     <section className="page">
-      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : "Ledger"}</h1></div><button className="primary-action" onClick={() => setDialog("transaction")}>Add transaction</button></header>
+      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" ? "PLANNING" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : "Ledger"}</h1></div><button className="primary-action" onClick={() => setDialog("transaction")}>Add transaction</button></header>
       {error ? <p className="status error">Local data store unavailable: {error}</p> : null}
       {!dashboard && !error ? <p className="status">Opening encrypted local data store...</p> : null}
       {dashboard && view === "dashboard" ? <div className="dashboard-grid">
@@ -62,6 +63,7 @@ export function App() {
         </Widget>
       </div> : null}
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} /> : null}
+      {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} onMonthChange={setCalendarMonth} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
       {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
     </section>
@@ -70,6 +72,17 @@ export function App() {
 
 function Ledger({ transactions }: { transactions: LedgerEntry[] }) {
   return <section className="ledger-widget"><div className="ledger-toolbar"><input aria-label="Search transactions" placeholder="Search transactions" /><span>{transactions.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span></div>{transactions.length === 0 ? <p className="empty-copy">Your ledger is empty.</p> : transactions.map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><strong>{item.description}</strong><span>{item.accountName}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div></section>;
+}
+
+function Calendar({ month, transactions, onMonthChange }: { month: Date; transactions: LedgerEntry[]; onMonthChange: (month: Date) => void }) {
+  const [selected, setSelected] = useState<string | null>(null);
+  const year = month.getFullYear(); const monthIndex = month.getMonth();
+  const first = new Date(year, monthIndex, 1); const start = new Date(year, monthIndex, 1 - first.getDay());
+  const monthTitle = month.toLocaleString("en-US", { month: "long", year: "numeric" });
+  const transactionMap = new Map<string, LedgerEntry[]>();
+  transactions.forEach(item => transactionMap.set(item.transactionDate, [...(transactionMap.get(item.transactionDate) ?? []), item]));
+  const selectedItems = selected ? transactionMap.get(selected) ?? [] : [];
+  return <section className="calendar-widget"><div className="calendar-controls"><button onClick={() => onMonthChange(new Date(year, monthIndex - 1, 1))}>‹</button><strong>{monthTitle}</strong><button onClick={() => onMonthChange(new Date(year, monthIndex + 1, 1))}>›</button></div><div className="calendar-grid">{["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(day => <div className="calendar-day-name" key={day}>{day}</div>)}{Array.from({ length: 42 }, (_, index) => { const date = new Date(start); date.setDate(start.getDate() + index); const key = date.toISOString().slice(0, 10); const entries = transactionMap.get(key) ?? []; const income = entries.filter(item => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0); const spend = entries.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0); return <button className={`calendar-cell ${date.getMonth() !== monthIndex ? "outside" : ""} ${selected === key ? "selected-cell" : ""}`} onClick={() => setSelected(key)} key={key}><span>{date.getDate()}</span>{income ? <small className="positive">+{formatMoney(income)}</small> : null}{spend ? <small className="negative">{formatMoney(spend)}</small> : null}</button>; })}</div>{selected ? <aside className="date-popover"><header><strong>{new Date(`${selected}T12:00:00`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</strong><button onClick={() => setSelected(null)}>×</button></header>{selectedItems.length === 0 ? <p className="empty-copy">No transactions.</p> : selectedItems.map(item => <div className="popover-item" key={item.id}><span>{item.description}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</aside> : null}</section>;
 }
 
 function AccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
