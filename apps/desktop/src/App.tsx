@@ -6,7 +6,7 @@ type LedgerEntry = { id: string; transactionDate: string; description: string; a
 type DashboardData = { incomeCents: number; spendingCents: number; accounts: Account[]; recentTransactions: LedgerEntry[] };
 type LedgerData = { transactions: LedgerEntry[] };
 type Schedule = { id: string; startDate: string; description: string; amountCents: number; recurrence: string; accountName: string };
-type View = "dashboard" | "ledger" | "calendar" | "scheduled";
+type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const formatMoney = (cents: number) => money.format(cents / 100);
@@ -42,12 +42,12 @@ export function App() {
       <button className={`nav-button ${view === "dashboard" ? "selected" : ""}`} onClick={() => setView("dashboard")} aria-label="Dashboard">▦</button>
       <button className={`nav-button ${view === "calendar" ? "selected" : ""}`} onClick={() => setView("calendar")} aria-label="Calendar">□</button>
       <button className={`nav-button ${view === "ledger" ? "selected" : ""}`} onClick={() => setView("ledger")} aria-label="Ledger">☷</button>
-      <button className="nav-button" aria-label="Accounts">◎</button>
+      <button className={`nav-button ${view === "accounts" ? "selected" : ""}`} onClick={() => setView("accounts")} aria-label="Accounts">◎</button>
       <button className={`nav-button ${view === "scheduled" ? "selected" : ""}`} onClick={() => setView("scheduled")} aria-label="Scheduled transactions">⌁</button>
       <button className="nav-button" aria-label="AI workspace">AI</button>
     </aside>
     <section className="page">
-      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" ? "PLANNING" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : "Ledger"}</h1></div><button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : "transaction")}>{view === "scheduled" ? "Add schedule" : "Add transaction"}</button></header>
+      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" ? "PLANNING" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : "Ledger"}</h1></div><button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : view === "accounts" ? "account" : "transaction")}>{view === "scheduled" ? "Add schedule" : view === "accounts" ? "Add account" : "Add transaction"}</button></header>
       {error ? <p className="status error">Local data store unavailable: {error}</p> : null}
       {!dashboard && !error ? <p className="status">Opening encrypted local data store...</p> : null}
       {dashboard && view === "dashboard" ? <div className="dashboard-grid">
@@ -73,6 +73,7 @@ export function App() {
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} onMonthChange={setCalendarMonth} /> : null}
       {view === "scheduled" ? <Scheduled schedules={schedules} /> : null}
+      {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} onAdd={() => setDialog("account")} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
       {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
       {dialog === "schedule" ? <ScheduleDialog accounts={dashboard?.accounts ?? []} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); setView("scheduled"); }} /> : null}
@@ -87,6 +88,8 @@ function Ledger({ transactions, onDeleted }: { transactions: LedgerEntry[]; onDe
 }
 
 function Scheduled({ schedules }: { schedules: Schedule[] }) { return <section className="ledger-widget"><div className="ledger-head"><span>Starts</span><span>Description</span><span>Account</span><span>Amount</span></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.startDate}<small>{item.recurrence}</small></span><strong>{item.description}</strong><span>{item.accountName}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</section>; }
+
+function Accounts({ accounts, onAdd }: { accounts: Account[]; onAdd: () => void }) { return <section className="ledger-widget accounts-page"><div className="account-grid">{accounts.map(account => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong></article>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Connect Plaid account from Dashboard</small></button></div></section>; }
 
 function Calendar({ month, transactions, onMonthChange }: { month: Date; transactions: LedgerEntry[]; onMonthChange: (month: Date) => void }) {
   const [selected, setSelected] = useState<string | null>(null);
