@@ -66,7 +66,7 @@ export function App() {
           {dashboard.recentTransactions.length === 0 ? <p className="empty-copy">Add a transaction or connect an account to start your ledger.</p> : <div className="transaction-list">{dashboard.recentTransactions.map((item) => <div className="transaction-row" key={item.id}><div><strong>{item.description}</strong><small>{item.transactionDate} · {item.accountName}</small></div><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div>}
         </Widget>
       </div> : null}
-      {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} /> : null}
+      {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} onMonthChange={setCalendarMonth} /> : null}
       {view === "scheduled" ? <Scheduled schedules={schedules} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
@@ -76,8 +76,10 @@ export function App() {
   </main>;
 }
 
-function Ledger({ transactions }: { transactions: LedgerEntry[] }) {
-  return <section className="ledger-widget"><div className="ledger-toolbar"><input aria-label="Search transactions" placeholder="Search transactions" /><span>{transactions.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span></div>{transactions.length === 0 ? <p className="empty-copy">Your ledger is empty.</p> : transactions.map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><strong>{item.description}</strong><span>{item.accountName}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div></section>;
+function Ledger({ transactions, onDeleted }: { transactions: LedgerEntry[]; onDeleted: () => void }) {
+  const [query, setQuery] = useState(""); const filtered = transactions.filter(item => `${item.description} ${item.accountName} ${item.amountCents}`.toLowerCase().includes(query.toLowerCase()));
+  async function remove(item: LedgerEntry) { if (!confirm(`Delete ${item.description}?`)) return; await invoke("delete_transaction", { transactionId: item.id }); onDeleted(); }
+  return <section className="ledger-widget"><div className="ledger-toolbar"><input aria-label="Search transactions" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search name, account, or amount" /><span>{filtered.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span></div>{filtered.length === 0 ? <p className="empty-copy">No matching transactions.</p> : filtered.map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><strong>{item.description}</strong><span>{item.accountName}</span><span className="ledger-amount"><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong><button onClick={() => void remove(item)}>Delete</button></span></div>)}</div></section>;
 }
 
 function Scheduled({ schedules }: { schedules: Schedule[] }) { return <section className="ledger-widget"><div className="ledger-head"><span>Starts</span><span>Description</span><span>Account</span><span>Amount</span></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.startDate}<small>{item.recurrence}</small></span><strong>{item.description}</strong><span>{item.accountName}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</section>; }

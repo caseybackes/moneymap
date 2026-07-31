@@ -228,6 +228,14 @@ fn create_transaction(app: AppHandle, input: CreateTransactionInput) -> Result<S
 }
 
 #[tauri::command]
+fn delete_transaction(app: AppHandle, transaction_id: String) -> Result<(), String> {
+    let (connection, _) = open_database(&app)?;
+    let deleted = connection.execute("DELETE FROM transactions WHERE id = ?1", [transaction_id]).map_err(|error| error.to_string())?;
+    if deleted != 1 { return Err("Transaction no longer exists.".into()); }
+    Ok(())
+}
+
+#[tauri::command]
 fn ledger_data(app: AppHandle) -> Result<LedgerData, String> {
     let (connection, _) = open_database(&app)?;
     let mut statement = connection.prepare(
@@ -293,7 +301,7 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, ledger_data, scheduled_data, create_schedule, import_plaid_sandbox])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, delete_transaction, ledger_data, scheduled_data, create_schedule, import_plaid_sandbox])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }
