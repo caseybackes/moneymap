@@ -77,6 +77,7 @@ export function App() {
   const periodTransactions = useMemo(() => { if (!dashboard) return []; if (rangeMonths === null) return dashboard.recentTransactions; const start = new Date(); start.setMonth(start.getMonth() - rangeMonths); return dashboard.recentTransactions.filter(item => new Date(`${item.transactionDate}T12:00:00`) >= start); }, [dashboard, rangeMonths]);
   const periodIncome = periodTransactions.filter(item => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0);
   const periodSpending = -periodTransactions.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0);
+  const periodLabel = rangeMonths === null ? "All activity" : rangeMonths === 1 ? "Last month" : rangeMonths === 12 ? "Last year" : `Last ${rangeMonths} months`;
   async function addSuggestedSchedule(item: RecurringSuggestion) { await invoke("create_schedule", { input: { accountId: item.accountId, startDate: item.nextOccurrence, description: item.description, amountCents: item.amountCents, recurrence: item.recurrence } }); setSuggestions(current => current.filter(candidate => !(candidate.accountId === item.accountId && candidate.description === item.description && candidate.amountCents === item.amountCents))); }
   async function syncConnectedAccounts() { setSyncingAccounts(true); setError(null); try { await invoke("sync_plaid_sandbox_connections"); refresh(); if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
   async function disconnectConnectedAccount(connection: ConnectedInstitution) { if (!confirm(`Disconnect ${connection.institutionName}? Local history will be kept, but future sync will stop.`)) return; setSyncingAccounts(true); try { await invoke("disconnect_plaid_sandbox_connection", { connectionId: connection.id }); setConnections(current => current.filter(item => item.id !== connection.id)); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
@@ -101,7 +102,7 @@ export function App() {
           <strong className="big-number">{formatMoney(netWorth)}</strong><p>Across all local accounts</p>
           <NetWorthChart netWorth={netWorth} transactions={periodTransactions} />
         </Widget>
-        <Widget title="This month" className="month-widget">
+        <Widget title={periodLabel} className="month-widget">
           <div className="metric"><span>Income</span><strong className="positive">{formatMoney(periodIncome)}</strong></div>
           <div className="metric"><span>Spending</span><strong className="negative">{formatMoney(periodSpending)}</strong></div>
           <div className="range-buttons">{[["1M",1],["3M",3],["6M",6],["1Y",12],["All",null]].map(([label, months]) => <button key={label as string} className={rangeMonths === months ? "active" : ""} onClick={() => setRangeMonths(months as number | null)}>{label}</button>)}</div>
