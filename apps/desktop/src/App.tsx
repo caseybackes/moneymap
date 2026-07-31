@@ -3,7 +3,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { usePlaidLink } from "react-plaid-link";
 
 type Account = { id: string; name: string; accountType: string; balanceCents: number };
-type LedgerEntry = { id: string; transactionDate: string; description: string; accountName: string; amountCents: number };
+type LedgerEntry = { id: string; transactionDate: string; description: string; accountName: string; categoryName: string; amountCents: number };
 type DashboardData = { incomeCents: number; spendingCents: number; accounts: Account[]; recentTransactions: LedgerEntry[] };
 type LedgerData = { transactions: LedgerEntry[] };
 type Schedule = { id: string; accountId: string; startDate: string; nextOccurrence: string; description: string; amountCents: number; recurrence: string; accountName: string };
@@ -86,9 +86,19 @@ export function App() {
 }
 
 function Ledger({ transactions, onDeleted }: { transactions: LedgerEntry[]; onDeleted: () => void }) {
-  const [query, setQuery] = useState(""); const filtered = transactions.filter(item => `${item.description} ${item.accountName} ${item.amountCents}`.toLowerCase().includes(query.toLowerCase()));
+  const [query, setQuery] = useState(""); const [category, setCategory] = useState("all"); const [fromDate, setFromDate] = useState(""); const [toDate, setToDate] = useState(""); const [amount, setAmount] = useState(""); const [visible, setVisible] = useState(50);
+  const categories = useMemo(() => [...new Set(transactions.map(item => item.categoryName))].sort(), [transactions]);
+  const filtered = useMemo(() => transactions.filter(item => {
+    const hasQuery = `${item.description} ${item.accountName} ${item.categoryName} ${Math.abs(item.amountCents / 100).toFixed(2)}`.toLowerCase().includes(query.toLowerCase());
+    const hasCategory = category === "all" || item.categoryName === category;
+    const hasDate = (!fromDate || item.transactionDate >= fromDate) && (!toDate || item.transactionDate <= toDate);
+    const numericAmount = Number(amount); const hasAmount = !amount || (Number.isFinite(numericAmount) && Math.abs(item.amountCents) >= Math.round(numericAmount * 100));
+    return hasQuery && hasCategory && hasDate && hasAmount;
+  }), [transactions, query, category, fromDate, toDate, amount]);
+  useEffect(() => setVisible(50), [query, category, fromDate, toDate, amount]);
   async function remove(item: LedgerEntry) { if (!confirm(`Delete ${item.description}?`)) return; await invoke("delete_transaction", { transactionId: item.id }); onDeleted(); }
-  return <section className="ledger-widget"><div className="ledger-toolbar"><input aria-label="Search transactions" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search name, account, or amount" /><span>{filtered.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span></div>{filtered.length === 0 ? <p className="empty-copy">No matching transactions.</p> : filtered.map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><strong>{item.description}</strong><span>{item.accountName}</span><span className="ledger-amount"><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong><button onClick={() => void remove(item)}>Delete</button></span></div>)}</div></section>;
+  function clearFilters() { setQuery(""); setCategory("all"); setFromDate(""); setToDate(""); setAmount(""); }
+  return <section className="ledger-widget"><div className="ledger-toolbar ledger-filters"><input aria-label="Search transactions" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search description or account" /><select aria-label="Filter by category" value={category} onChange={event => setCategory(event.target.value)}><option value="all">All categories</option>{categories.map(name => <option key={name} value={name}>{name}</option>)}</select><label>From<input type="date" value={fromDate} onChange={event => setFromDate(event.target.value)} /></label><label>To<input type="date" value={toDate} onChange={event => setToDate(event.target.value)} /></label><label>Min. amount<input type="number" min="0" step="0.01" value={amount} onChange={event => setAmount(event.target.value)} placeholder="$0.00" /></label><button onClick={clearFilters}>Clear</button><span>{filtered.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span></div>{filtered.length === 0 ? <p className="empty-copy">No matching transactions.</p> : filtered.slice(0, visible).map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><span><strong>{item.description}</strong><small>{item.categoryName}</small></span><span>{item.accountName}</span><span className="ledger-amount"><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong><button onClick={() => void remove(item)}>Delete</button></span></div>)}</div>{visible < filtered.length ? <div className="ledger-load"><button className="primary-action" onClick={() => setVisible(count => count + 50)}>Load 50 more</button><span>{Math.min(visible, filtered.length)} of {filtered.length}</span></div> : null}</section>;
 }
 
 function Scheduled({ schedules, onEdit, onChanged }: { schedules: Schedule[]; onEdit: (schedule: Schedule) => void; onChanged: () => void }) {

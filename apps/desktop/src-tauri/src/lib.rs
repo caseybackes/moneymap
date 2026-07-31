@@ -36,6 +36,7 @@ struct DashboardTransaction {
     transaction_date: String,
     description: String,
     account_name: String,
+    category_name: String,
     amount_cents: i64,
 }
 
@@ -239,12 +240,12 @@ fn dashboard_data(app: AppHandle) -> Result<DashboardData, String> {
         .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
 
     let mut transaction_statement = connection.prepare(
-        "SELECT t.id, t.transaction_date, t.description, a.name, t.amount_cents
-         FROM transactions t JOIN accounts a ON a.id = t.account_id
+        "SELECT t.id, t.transaction_date, t.description, a.name, COALESCE(c.name, 'Uncategorized'), t.amount_cents
+         FROM transactions t JOIN accounts a ON a.id = t.account_id LEFT JOIN categories c ON c.id = t.category_id
          ORDER BY t.transaction_date DESC, t.created_at DESC",
     ).map_err(|error| error.to_string())?;
     let recent_transactions = transaction_statement.query_map([], |row| Ok(DashboardTransaction {
-        id: row.get(0)?, transaction_date: row.get(1)?, description: row.get(2)?, account_name: row.get(3)?, amount_cents: row.get(4)?,
+        id: row.get(0)?, transaction_date: row.get(1)?, description: row.get(2)?, account_name: row.get(3)?, category_name: row.get(4)?, amount_cents: row.get(5)?,
     })).map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
 
@@ -296,12 +297,12 @@ fn delete_transaction(app: AppHandle, transaction_id: String) -> Result<(), Stri
 fn ledger_data(app: AppHandle) -> Result<LedgerData, String> {
     let (connection, _) = open_database(&app)?;
     let mut statement = connection.prepare(
-        "SELECT t.id, t.transaction_date, t.description, a.name, t.amount_cents
-         FROM transactions t JOIN accounts a ON a.id = t.account_id
+        "SELECT t.id, t.transaction_date, t.description, a.name, COALESCE(c.name, 'Uncategorized'), t.amount_cents
+         FROM transactions t JOIN accounts a ON a.id = t.account_id LEFT JOIN categories c ON c.id = t.category_id
          ORDER BY t.transaction_date DESC, t.created_at DESC",
     ).map_err(|error| error.to_string())?;
     let transactions = statement.query_map([], |row| Ok(DashboardTransaction {
-        id: row.get(0)?, transaction_date: row.get(1)?, description: row.get(2)?, account_name: row.get(3)?, amount_cents: row.get(4)?,
+        id: row.get(0)?, transaction_date: row.get(1)?, description: row.get(2)?, account_name: row.get(3)?, category_name: row.get(4)?, amount_cents: row.get(5)?,
     })).map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
     Ok(LedgerData { transactions })
