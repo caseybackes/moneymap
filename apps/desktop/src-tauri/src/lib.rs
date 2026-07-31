@@ -642,15 +642,30 @@ fn apply_plaid_sync(app: &AppHandle, local_connection_id: &str, payload: &Value)
         let mask = account["mask"].as_str();
         let current_balance_cents = cents(&account["balances"]["current"]);
         let available_balance_cents = cents(&account["balances"]["available"]);
-        let existing: Option<String> = transaction.query_row(
+        let linked_account: Option<String> = transaction.query_row(
             "SELECT account_id FROM plaid_account_links WHERE plaid_connection_id = ?1 AND external_account_id = ?2",
             (local_connection_id, external_account_id),
             |row| row.get(0),
         ).optional().map_err(|error| error.to_string())?;
+        let local_name = format!("{institution} · {name}");
+        // The old developer fixture used the same account names and stable Plaid
+        // transaction ids but had no connection link. Adopt it on the first real
+        // Sandbox Link sync so the user does not see duplicate Platypus data.
+        let existing = match linked_account {
+            Some(account_id) => Some(account_id),
+            None => transaction.query_row(
+                "SELECT a.id FROM accounts a
+                 WHERE a.name = ?1
+                   AND NOT EXISTS(SELECT 1 FROM plaid_account_links l WHERE l.account_id = a.id)
+                   AND EXISTS(SELECT 1 FROM transactions t WHERE t.account_id = a.id AND t.source = 'plaid-sandbox')
+                 LIMIT 1",
+                [&local_name],
+                |row| row.get(0),
+            ).optional().map_err(|error| error.to_string())?,
+        };
         let is_new = existing.is_none();
         let account_id = existing.unwrap_or_else(new_id);
         if is_new {
-            let local_name = format!("{institution} · {name}");
             transaction.execute(
                 "INSERT INTO accounts(id, name, type, opening_balance_cents, reported_balance_cents) VALUES(?1, ?2, ?3, 0, ?4)",
                 (&account_id, &local_name, account_type, current_balance_cents),
@@ -664,7 +679,6 @@ fn apply_plaid_sync(app: &AppHandle, local_connection_id: &str, payload: &Value)
                  mask, current_balance_cents, available_balance_cents),
             ).map_err(|error| error.to_string())?;
         } else {
-            let local_name = format!("{} · {}", institution, name);
             transaction.execute(
                 "UPDATE accounts
                  SET name = ?1, type = ?2, reported_balance_cents = COALESCE(?3, reported_balance_cents)
@@ -690,6 +704,11 @@ fn apply_plaid_sync(app: &AppHandle, local_connection_id: &str, payload: &Value)
         let external_id = item["transaction_id"].as_str().ok_or("Sandbox transaction has no id.")?;
         let Some(account_id) = item["account_id"].as_str().and_then(|value| account_ids.get(value)) else { continue; };
         let amount = cents(&item["amount"]).ok_or("Sandbox transaction amount is invalid.")?;
+        transaction.execute(
+            "UPDATE transactions SET account_id = ?1, source = ?2
+             WHERE source = 'plaid-sandbox' AND external_transaction_id = ?3",
+            (account_id, &source, external_id),
+        ).map_err(|error| error.to_string())?;
         transaction.execute(
             "INSERT INTO transactions(id, account_id, transaction_date, description, amount_cents, source, external_transaction_id)
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
