@@ -115,6 +115,7 @@ struct CreateTransactionInput {
     amount_cents: i64,
     category_id: Option<String>,
     notes: Option<String>,
+    schedule_recurrence: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -392,11 +393,27 @@ fn create_transaction(app: AppHandle, input: CreateTransactionInput) -> Result<S
         .map_err(|error| error.to_string())?;
     if !exists { return Err("Choose an existing account.".into()); }
     let id = new_id();
-    connection.execute(
+    let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
+    transaction.execute(
         "INSERT INTO transactions(id, account_id, transaction_date, description, amount_cents, category_id, notes)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         (&id, &input.account_id, &input.transaction_date, input.description.trim(), input.amount_cents, input.category_id, input.notes),
     ).map_err(|error| error.to_string())?;
+    if let Some(recurrence) = input.schedule_recurrence.as_deref() {
+        let modifier = match recurrence {
+            "daily" => "+1 day", "weekly" => "+7 days", "biweekly" => "+14 days",
+            "monthly" => "+1 month", "quarterly" => "+3 months", "yearly" => "+1 year",
+            _ => return Err("Choose a valid recurrence period.".into()),
+        };
+        let next_date: String = transaction.query_row("SELECT date(?1, ?2)", (&input.transaction_date, modifier), |row| row.get(0))
+            .map_err(|error| error.to_string())?;
+        transaction.execute(
+            "INSERT INTO scheduled_transactions(id, account_id, start_date, description, amount_cents, recurrence)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            (new_id(), &input.account_id, next_date, input.description.trim(), input.amount_cents, recurrence),
+        ).map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(id)
 }
 
