@@ -9,6 +9,7 @@ type LedgerData = { transactions: LedgerEntry[] };
 type Schedule = { id: string; accountId: string; startDate: string; nextOccurrence: string; description: string; amountCents: number; recurrence: string; accountName: string };
 type SandboxLinkSession = { linkToken: string; sessionId: string; sessionSecret: string; expiration: string };
 type Category = { id: string; name: string };
+type RecurringSuggestion = { accountId: string; accountName: string; description: string; amountCents: number; recurrence: string; nextOccurrence: string; occurrences: number };
 type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts" | "scenarios" | "categories";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
@@ -59,12 +60,14 @@ export function App() {
   const [editingTransaction, setEditingTransaction] = useState<LedgerEntry | null>(null);
   const [adjustingAccount, setAdjustingAccount] = useState<Account | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [suggestions, setSuggestions] = useState<RecurringSuggestion[]>([]);
   const [importing, setImporting] = useState(false);
   const [rangeMonths, setRangeMonths] = useState<number | null>(1);
 
   const refresh = useCallback(() => { void invoke<DashboardData>("dashboard_data").then(setDashboard).catch((reason: unknown) => setError(String(reason))); }, []);
   useEffect(refresh, [refresh]);
   useEffect(() => { void invoke<Category[]>("categories_data").then(setCategories).catch((reason: unknown) => setError(String(reason))); }, []);
+  useEffect(() => { if (dashboard) void invoke<RecurringSuggestion[]>("recurring_suggestions").then(setSuggestions).catch((reason: unknown) => setError(String(reason))); }, [dashboard]);
   useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); if (view === "scheduled") void invoke<Schedule[]>("scheduled_data").then(setSchedules).catch((reason: unknown) => setError(String(reason))); }, [view]);
 
   const netWorth = useMemo(() => dashboard?.accounts.reduce((total, account) => total + account.balanceCents, 0) ?? 0, [dashboard]);
@@ -72,6 +75,7 @@ export function App() {
   const periodIncome = periodTransactions.filter(item => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0);
   const periodSpending = -periodTransactions.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0);
   async function importSandbox() { setImporting(true); setError(null); try { await invoke("import_plaid_sandbox"); refresh(); } catch (reason) { setError(String(reason)); } finally { setImporting(false); } }
+  async function addSuggestedSchedule(item: RecurringSuggestion) { await invoke("create_schedule", { input: { accountId: item.accountId, startDate: item.nextOccurrence, description: item.description, amountCents: item.amountCents, recurrence: item.recurrence } }); setSuggestions(current => current.filter(candidate => !(candidate.accountId === item.accountId && candidate.description === item.description && candidate.amountCents === item.amountCents))); }
 
   return <main className="app-shell">
     <aside className="rail" aria-label="Primary navigation">
@@ -107,6 +111,9 @@ export function App() {
         </Widget>
         <Widget title="Recent transactions" className="recent-widget">
           {dashboard.recentTransactions.length === 0 ? <p className="empty-copy">Add a transaction or connect an account to start your ledger.</p> : <div className="transaction-list">{dashboard.recentTransactions.map((item) => <div className="transaction-row" key={item.id}><div><strong>{item.description}</strong><small>{item.transactionDate} · {item.accountName}</small></div><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div>}
+        </Widget>
+        <Widget title="Recurring suggestions" className="suggestions-widget">
+          {suggestions.length === 0 ? <p className="empty-copy">No clear recurring patterns to review.</p> : <div className="suggestion-list">{suggestions.map(item => <div className="suggestion-row" key={`${item.accountId}:${item.description}:${item.amountCents}`}><div><strong>{item.description}</strong><small>{item.accountName} · {formatMoney(item.amountCents)} · {item.recurrence} · next {item.nextOccurrence}</small></div><span><button onClick={() => setSuggestions(current => current.filter(candidate => candidate !== item))}>Dismiss</button><button className="primary-action" onClick={() => void addSuggestedSchedule(item)}>Add schedule</button></span></div>)}</div>}
         </Widget>
       </div> : null}
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onEdit={(entry) => { setEditingTransaction(entry); setDialog("transaction"); }} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}

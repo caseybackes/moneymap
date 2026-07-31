@@ -63,6 +63,10 @@ struct ScheduledEntry { id: String, account_id: String, start_date: String, next
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct RecurringSuggestion { account_id: String, account_name: String, description: String, amount_cents: i64, recurrence: String, next_occurrence: String, occurrences: i64 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SandboxLinkSession {
     link_token: String,
     session_id: String,
@@ -406,6 +410,33 @@ fn create_category(app: AppHandle, name: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn recurring_suggestions(app: AppHandle) -> Result<Vec<RecurringSuggestion>, String> {
+    let (connection, _) = open_database(&app)?;
+    let mut statement = connection.prepare(
+        "WITH ordered AS (
+           SELECT t.account_id, t.description, t.amount_cents, t.transaction_date, julianday(t.transaction_date) AS day_number,
+             LAG(julianday(t.transaction_date)) OVER (PARTITION BY t.account_id, lower(t.description), t.amount_cents ORDER BY t.transaction_date) AS previous_day
+           FROM transactions t WHERE t.source NOT IN ('scheduled', 'adjustment')
+         ), grouped AS (
+           SELECT account_id, description, amount_cents, MAX(transaction_date) AS last_date, COUNT(*) AS occurrences,
+             AVG(CASE WHEN previous_day IS NOT NULL THEN day_number - previous_day END) AS average_days
+           FROM ordered GROUP BY account_id, lower(description), amount_cents
+         )
+         SELECT g.account_id, a.name, g.description, g.amount_cents,
+           CASE WHEN g.average_days BETWEEN 6 AND 8 THEN 'weekly' ELSE 'monthly' END,
+           CASE WHEN g.average_days BETWEEN 6 AND 8 THEN date(g.last_date, '+7 days') ELSE date(g.last_date, '+1 month') END,
+           g.occurrences
+         FROM grouped g JOIN accounts a ON a.id = g.account_id
+         WHERE g.occurrences >= 3 AND (g.average_days BETWEEN 6 AND 8 OR g.average_days BETWEEN 27 AND 33)
+         ORDER BY g.occurrences DESC, g.description COLLATE NOCASE LIMIT 8"
+    ).map_err(|error| error.to_string())?;
+    let suggestions = statement.query_map([], |row| Ok(RecurringSuggestion {
+        account_id: row.get(0)?, account_name: row.get(1)?, description: row.get(2)?, amount_cents: row.get(3)?, recurrence: row.get(4)?, next_occurrence: row.get(5)?, occurrences: row.get(6)?,
+    })).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok(suggestions)
+}
+
+#[tauri::command]
 fn scheduled_data(app: AppHandle) -> Result<Vec<ScheduledEntry>, String> {
     let (connection, _) = open_database(&app)?;
     let mut statement = connection.prepare("SELECT s.id, s.account_id, s.start_date,
@@ -630,7 +661,7 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }
