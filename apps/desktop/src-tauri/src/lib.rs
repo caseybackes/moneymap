@@ -184,7 +184,7 @@ fn dashboard_data(app: AppHandle) -> Result<DashboardData, String> {
     let mut transaction_statement = connection.prepare(
         "SELECT t.id, t.transaction_date, t.description, a.name, t.amount_cents
          FROM transactions t JOIN accounts a ON a.id = t.account_id
-         ORDER BY t.transaction_date DESC, t.created_at DESC LIMIT 6",
+         ORDER BY t.transaction_date DESC, t.created_at DESC",
     ).map_err(|error| error.to_string())?;
     let recent_transactions = transaction_statement.query_map([], |row| Ok(DashboardTransaction {
         id: row.get(0)?, transaction_date: row.get(1)?, description: row.get(2)?, account_name: row.get(3)?, amount_cents: row.get(4)?,

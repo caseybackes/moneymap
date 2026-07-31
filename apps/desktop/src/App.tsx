@@ -24,12 +24,16 @@ export function App() {
   const [calendarMonth, setCalendarMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [importing, setImporting] = useState(false);
+  const [rangeMonths, setRangeMonths] = useState<number | null>(1);
 
   const refresh = useCallback(() => { void invoke<DashboardData>("dashboard_data").then(setDashboard).catch((reason: unknown) => setError(String(reason))); }, []);
   useEffect(refresh, [refresh]);
   useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); if (view === "scheduled") void invoke<Schedule[]>("scheduled_data").then(setSchedules).catch((reason: unknown) => setError(String(reason))); }, [view]);
 
   const netWorth = useMemo(() => dashboard?.accounts.reduce((total, account) => total + account.balanceCents, 0) ?? 0, [dashboard]);
+  const periodTransactions = useMemo(() => { if (!dashboard) return []; if (rangeMonths === null) return dashboard.recentTransactions; const start = new Date(); start.setMonth(start.getMonth() - rangeMonths); return dashboard.recentTransactions.filter(item => new Date(`${item.transactionDate}T12:00:00`) >= start); }, [dashboard, rangeMonths]);
+  const periodIncome = periodTransactions.filter(item => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0);
+  const periodSpending = -periodTransactions.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0);
   async function importSandbox() { setImporting(true); setError(null); try { await invoke("import_plaid_sandbox"); refresh(); } catch (reason) { setError(String(reason)); } finally { setImporting(false); } }
 
   return <main className="app-shell">
@@ -52,9 +56,9 @@ export function App() {
           <div className="sparkline" aria-label="Net worth history placeholder"><span /><span /><span /><span /><span /></div>
         </Widget>
         <Widget title="This month" className="month-widget">
-          <div className="metric"><span>Income</span><strong className="positive">{formatMoney(dashboard.incomeCents)}</strong></div>
-          <div className="metric"><span>Spending</span><strong className="negative">{formatMoney(dashboard.spendingCents)}</strong></div>
-          <div className="range-buttons"><button className="active">1M</button><button>3M</button><button>6M</button><button>1Y</button><button>All</button></div>
+          <div className="metric"><span>Income</span><strong className="positive">{formatMoney(periodIncome)}</strong></div>
+          <div className="metric"><span>Spending</span><strong className="negative">{formatMoney(periodSpending)}</strong></div>
+          <div className="range-buttons">{[["1M",1],["3M",3],["6M",6],["1Y",12],["All",null]].map(([label, months]) => <button key={label as string} className={rangeMonths === months ? "active" : ""} onClick={() => setRangeMonths(months as number | null)}>{label}</button>)}</div>
         </Widget>
         <Widget title="Accounts & cards" className="accounts-widget">
           <div className="account-grid">
