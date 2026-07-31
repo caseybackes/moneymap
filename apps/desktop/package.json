@@ -11,7 +11,8 @@
   "dependencies": {
     "@tauri-apps/api": "^2.9.0",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1"
+    "react-dom": "^19.1.1",
+    "react-plaid-link": "^5.0.0"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.5",

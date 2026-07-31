@@ -1,11 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { usePlaidLink } from "react-plaid-link";
 
 type Account = { id: string; name: string; accountType: string; balanceCents: number };
 type LedgerEntry = { id: string; transactionDate: string; description: string; accountName: string; amountCents: number };
 type DashboardData = { incomeCents: number; spendingCents: number; accounts: Account[]; recentTransactions: LedgerEntry[] };
 type LedgerData = { transactions: LedgerEntry[] };
 type Schedule = { id: string; startDate: string; description: string; amountCents: number; recurrence: string; accountName: string };
+type SandboxLinkSession = { linkToken: string; sessionId: string; sessionSecret: string; expiration: string };
 type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
@@ -63,7 +65,8 @@ export function App() {
         <Widget title="Accounts & cards" className="accounts-widget">
           <div className="account-grid">
             {dashboard.accounts.map((account) => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong></article>)}
-            <button className="connect-card" onClick={importSandbox} disabled={importing}><span>+</span><strong>{importing ? "Importing Sandbox…" : "Import Plaid Sandbox"}</strong><small>Developer fixture · no Trial slot</small></button>
+            <SandboxLinkButton onImported={refresh} />
+            <button className="connect-card secondary-connect" onClick={importSandbox} disabled={importing}><span>+</span><strong>{importing ? "Importing fixture…" : "Import Sandbox fixture"}</strong><small>Developer shortcut · no Trial slot</small></button>
           </div>
         </Widget>
         <Widget title="Recent transactions" className="recent-widget">
@@ -89,7 +92,40 @@ function Ledger({ transactions, onDeleted }: { transactions: LedgerEntry[]; onDe
 
 function Scheduled({ schedules }: { schedules: Schedule[] }) { return <section className="ledger-widget"><div className="ledger-head"><span>Starts</span><span>Description</span><span>Account</span><span>Amount</span></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.startDate}<small>{item.recurrence}</small></span><strong>{item.description}</strong><span>{item.accountName}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</section>; }
 
-function Accounts({ accounts, onAdd }: { accounts: Account[]; onAdd: () => void }) { return <section className="ledger-widget accounts-page"><div className="account-grid">{accounts.map(account => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong></article>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Connect Plaid account from Dashboard</small></button></div></section>; }
+function Accounts({ accounts, onAdd }: { accounts: Account[]; onAdd: () => void }) { return <section className="ledger-widget accounts-page"><div className="account-grid">{accounts.map(account => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong></article>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Manual account or balance tracking</small></button><SandboxLinkButton onImported={() => window.location.reload()} /></div></section>; }
+
+function SandboxLinkButton({ onImported }: { onImported: () => void }) {
+  const [session, setSession] = useState<SandboxLinkSession | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  async function begin() {
+    setLoading(true); setMessage(null);
+    try { setSession(await invoke<SandboxLinkSession>("create_plaid_sandbox_link_session")); }
+    catch (reason) { setMessage(String(reason)); setLoading(false); }
+  }
+  if (session) return <PlaidLinkLauncher session={session} onDone={() => { setSession(null); setLoading(false); onImported(); }} onCancelled={() => { setSession(null); setLoading(false); }} />;
+  return <div className="connect-card sandbox-link-card"><span>+</span><strong>{loading ? "Preparing Plaid Link…" : "Connect Sandbox account"}</strong><small>Uses Plaid Link · Sandbox only · no Trial slot</small><button onClick={() => void begin()} disabled={loading}>{loading ? "Working…" : "Open Plaid Link"}</button>{message ? <small className="form-error">{message}</small> : null}</div>;
+}
+
+function PlaidLinkLauncher({ session, onDone, onCancelled }: { session: SandboxLinkSession; onDone: () => void; onCancelled: () => void }) {
+  const [status, setStatus] = useState("Opening Plaid Link…");
+  const { open, ready } = usePlaidLink({
+    token: session.linkToken,
+    onSuccess: async (publicToken, metadata) => {
+      setStatus("Importing encrypted Sandbox records…");
+      try {
+        await invoke<number>("complete_plaid_sandbox_link", { input: {
+          sessionId: session.sessionId, sessionSecret: session.sessionSecret, publicToken,
+          institutionId: metadata.institution?.institution_id ?? null, institutionName: metadata.institution?.name ?? null,
+        } });
+        onDone();
+      } catch (reason) { setStatus(`Import failed: ${String(reason)}`); }
+    },
+    onExit: () => onCancelled(),
+  });
+  useEffect(() => { if (ready) open(); }, [open, ready]);
+  return <div className="connect-card sandbox-link-card"><span>↗</span><strong>{status}</strong><small>{ready ? "Complete or cancel the Plaid window." : "Loading Plaid Link…"}</small></div>;
+}
 
 function Calendar({ month, transactions, onMonthChange }: { month: Date; transactions: LedgerEntry[]; onMonthChange: (month: Date) => void }) {
   const [selected, setSelected] = useState<string | null>(null);

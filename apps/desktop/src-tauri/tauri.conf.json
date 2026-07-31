@@ -19,7 +19,7 @@
         "minHeight": 620
       }
     ],
-    "security": { "csp": "default-src 'self'; connect-src 'self' https://family-finance-broker.cloud-admin-f91.workers.dev; style-src 'self' 'unsafe-inline'" }
+    "security": { "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.plaid.com/link/v2/stable/link-initialize.js; style-src 'self' 'unsafe-inline'; frame-src https://cdn.plaid.com; img-src 'self' data: https://cdn.plaid.com; connect-src 'self' https://family-finance-broker.cloud-admin-f91.workers.dev https://sandbox.plaid.com" }
   },
   "bundle": {
     "active": true,

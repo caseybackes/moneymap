@@ -32,6 +32,23 @@ function bytesBase64(value) {
   return btoa(String.fromCharCode(...value));
 }
 
+function randomSecret() {
+  return bytesBase64(crypto.getRandomValues(new Uint8Array(32)));
+}
+
+async function secretHash(secret) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(secret));
+  return bytesBase64(new Uint8Array(digest));
+}
+
+async function readJson(request) {
+  try {
+    return await request.json();
+  } catch {
+    return null;
+  }
+}
+
 async function encryptToken(token, keyText) {
   const key = await crypto.subtle.importKey("raw", base64Bytes(keyText), { name: "AES-GCM" }, false, ["encrypt"]);
   const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -62,7 +79,7 @@ async function plaidPost(env, path, body) {
 
 async function getConnection(env, id) {
   return env.BROKER_DB.prepare(`SELECT id, plaid_item_id, institution_id, institution_name,
-    access_token_ciphertext, access_token_iv, sync_cursor, environment
+    access_token_ciphertext, access_token_iv, owner_secret_hash, sync_cursor, environment
     FROM connections WHERE id = ?`).bind(id).first();
 }
 
@@ -107,6 +124,12 @@ function authorize(request, env) {
 
 function notImplemented() {
   return problem(501, "not_configured", "Plaid access is not configured yet.");
+}
+
+async function authorizeSandboxConnection(request, connection) {
+  const presented = request.headers.get("x-family-finance-connection-key");
+  if (!presented || !connection.owner_secret_hash) return false;
+  return (await secretHash(presented)) === connection.owner_secret_hash;
 }
 
 export default {
@@ -155,22 +178,91 @@ export default {
       }
     }
 
-    // Sandbox Link token creation is intentionally isolated from the real
-    // connection flow. It never exchanges or persists an Item token.
+    // Sandbox Link is deliberately isolated from real-bank access. Link token
+    // creation issues a one-time broker session; the session secret is needed
+    // to complete and later synchronize this specific Sandbox Item.
     if (request.method === "POST" && url.pathname === "/v1/sandbox/link-token") {
       const configFailure = requirePlaid(env);
       if (configFailure) return configFailure;
       try {
+        const sessionId = crypto.randomUUID();
+        const sessionSecret = randomSecret();
+        await env.BROKER_DB.prepare(`INSERT INTO sandbox_link_sessions(id, secret_hash, expires_at)
+          VALUES (?, ?, unixepoch() + 14400)`).bind(sessionId, await secretHash(sessionSecret)).run();
         const result = await plaidPost(env, "/link/token/create", {
           client_name: "Family Finance Sandbox",
           language: "en",
           country_codes: ["US"],
           products: ["transactions"],
-          user: { client_user_id: `sandbox-${crypto.randomUUID()}` }
+          transactions: { days_requested: 180 },
+          user: { client_user_id: `sandbox-${sessionId}` }
         });
-        return json({ linkToken: result.link_token, expiration: result.expiration });
+        return json({ linkToken: result.link_token, expiration: result.expiration, sessionId, sessionSecret });
       } catch {
         return problem(502, "plaid_sandbox_error", "Plaid Sandbox did not create a Link token.");
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === "/v1/sandbox/link-complete") {
+      const configFailure = requirePlaid(env);
+      if (configFailure) return configFailure;
+      const body = await readJson(request);
+      if (!body?.sessionId || !body?.sessionSecret || !body?.publicToken) {
+        return problem(400, "invalid_request", "A Sandbox session and Plaid public token are required.");
+      }
+      const session = await env.BROKER_DB.prepare(`SELECT id, secret_hash FROM sandbox_link_sessions
+        WHERE id = ? AND expires_at > unixepoch()`).bind(body.sessionId).first();
+      if (!session || (await secretHash(body.sessionSecret)) !== session.secret_hash) {
+        return problem(401, "invalid_sandbox_session", "The Sandbox Link session is invalid or expired.");
+      }
+      try {
+        const exchange = await plaidPost(env, "/item/public_token/exchange", { public_token: body.publicToken });
+        const institution = body.institution ?? {};
+        const encrypted = await encryptToken(exchange.access_token, env.TOKEN_ENCRYPTION_KEY);
+        const connectionId = crypto.randomUUID();
+        const connectionSecret = randomSecret();
+        await env.BROKER_DB.prepare(`INSERT INTO connections
+          (id, plaid_item_id, institution_id, institution_name, access_token_ciphertext, access_token_iv, owner_secret_hash, environment)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'sandbox')`).bind(
+          connectionId,
+          exchange.item_id,
+          typeof institution.institution_id === "string" ? institution.institution_id : "sandbox-link",
+          typeof institution.name === "string" ? institution.name : "Plaid Sandbox institution",
+          encrypted.ciphertext,
+          encrypted.iv,
+          await secretHash(connectionSecret)
+        ).run();
+        await env.BROKER_DB.prepare("DELETE FROM sandbox_link_sessions WHERE id = ?").bind(session.id).run();
+        return json({ connection: {
+          id: connectionId,
+          institutionName: typeof institution.name === "string" ? institution.name : "Plaid Sandbox institution",
+          connectionSecret,
+          environment: "sandbox"
+        } }, { status: 201 });
+      } catch {
+        return problem(502, "plaid_sandbox_error", "Plaid Sandbox could not complete Link.");
+      }
+    }
+
+    const sandboxConnectionMatch = /^\/v1\/sandbox\/connections\/([^/]+)\/(sync|disconnect)$/.exec(url.pathname);
+    if (sandboxConnectionMatch && request.method === "POST") {
+      const configFailure = requirePlaid(env);
+      if (configFailure) return configFailure;
+      const [, connectionId, operation] = sandboxConnectionMatch;
+      const connection = await getConnection(env, connectionId);
+      if (!connection || connection.environment !== "sandbox") return problem(404, "connection_not_found", "Sandbox connection not found.");
+      if (!(await authorizeSandboxConnection(request, connection))) return problem(401, "unauthorized", "This Sandbox connection requires its local connection key.");
+      try {
+        if (operation === "sync") {
+          const synced = await syncTransactions(env, connection);
+          return json({ connection: { id: connection.id, institutionName: connection.institution_name, environment: "sandbox" }, accounts: await getAccounts(env, connection), ...synced });
+        }
+        const accessToken = await decryptToken(connection.access_token_ciphertext, connection.access_token_iv, env.TOKEN_ENCRYPTION_KEY);
+        await plaidPost(env, "/item/remove", { access_token: accessToken });
+        await env.BROKER_DB.prepare("DELETE FROM connections WHERE id = ?").bind(connectionId).run();
+        return new Response(null, { status: 204 });
+      } catch {
+        return problem(502, "plaid_sandbox_error", "Plaid Sandbox request failed.");
       }
     }
 

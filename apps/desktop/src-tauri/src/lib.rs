@@ -10,6 +10,7 @@ use tauri::{AppHandle, Manager};
 const KEYRING_SERVICE: &str = "com.caseybackes.family-finance";
 const KEYRING_ACCOUNT: &str = "database-key-v2";
 const SANDBOX_BROKER_URL: &str = "https://family-finance-broker.cloud-admin-f91.workers.dev/v1/sandbox/demo-transactions";
+const SANDBOX_BROKER_BASE_URL: &str = "https://family-finance-broker.cloud-admin-f91.workers.dev/v1/sandbox";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -56,6 +57,25 @@ struct LedgerData {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScheduledEntry { id: String, start_date: String, description: String, amount_cents: i64, recurrence: String, account_name: String }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SandboxLinkSession {
+    link_token: String,
+    session_id: String,
+    session_secret: String,
+    expiration: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompleteSandboxLinkInput {
+    session_id: String,
+    session_secret: String,
+    public_token: String,
+    institution_id: Option<String>,
+    institution_name: Option<String>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -143,8 +163,32 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
            recurrence TEXT NOT NULL CHECK(recurrence IN ('weekly', 'monthly')), active INTEGER NOT NULL DEFAULT 1,
            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
+         CREATE TABLE IF NOT EXISTS plaid_connections (
+           id TEXT PRIMARY KEY NOT NULL,
+           broker_connection_id TEXT NOT NULL UNIQUE,
+           connection_secret TEXT NOT NULL,
+           institution_name TEXT NOT NULL,
+           environment TEXT NOT NULL CHECK(environment IN ('sandbox', 'production')),
+           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         CREATE TABLE IF NOT EXISTS plaid_account_links (
+           plaid_connection_id TEXT NOT NULL REFERENCES plaid_connections(id) ON DELETE CASCADE,
+           external_account_id TEXT NOT NULL,
+           account_id TEXT NOT NULL REFERENCES accounts(id),
+           PRIMARY KEY(plaid_connection_id, external_account_id)
+         );
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);"
     ).map_err(|error| error.to_string())?;
+    let has_reported_balance: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('accounts') WHERE name = 'reported_balance_cents')",
+        [],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !has_reported_balance {
+        connection.execute_batch("ALTER TABLE accounts ADD COLUMN reported_balance_cents INTEGER; INSERT OR IGNORE INTO schema_migrations(version) VALUES (2);")
+            .map_err(|error| error.to_string())?;
+    }
     Ok((connection, path.display().to_string()))
 }
 
@@ -170,7 +214,7 @@ fn dashboard_data(app: AppHandle) -> Result<DashboardData, String> {
     ).map_err(|error| error.to_string())?;
 
     let mut account_statement = connection.prepare(
-        "SELECT a.id, a.name, a.type, a.opening_balance_cents + COALESCE(SUM(t.amount_cents), 0)
+        "SELECT a.id, a.name, a.type, COALESCE(a.reported_balance_cents, a.opening_balance_cents + COALESCE(SUM(t.amount_cents), 0))
          FROM accounts a
          LEFT JOIN transactions t ON t.account_id = a.id
          GROUP BY a.id, a.name, a.type, a.opening_balance_cents
@@ -272,6 +316,128 @@ fn create_schedule(app: AppHandle, input: CreateScheduleInput) -> Result<String,
     Ok(id)
 }
 
+fn broker_post(path: &str, body: Value, connection_secret: Option<&str>) -> Result<Value, String> {
+    let client = reqwest::blocking::Client::new();
+    let mut request = client.post(format!("{SANDBOX_BROKER_BASE_URL}/{path}")).json(&body);
+    if let Some(secret) = connection_secret {
+        request = request.header("x-family-finance-connection-key", secret);
+    }
+    let response = request.send().map_err(|error| format!("Could not reach the Family Finance broker: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Sandbox broker request failed ({})", response.status()));
+    }
+    response.json().map_err(|error| format!("Sandbox broker response was invalid: {error}"))
+}
+
+fn cents(value: &Value) -> Option<i64> {
+    value.as_f64().map(|amount| (amount * 100.0).round() as i64)
+}
+
+fn apply_plaid_sync(app: &AppHandle, local_connection_id: &str, payload: &Value) -> Result<usize, String> {
+    let (mut connection, _) = open_database(app)?;
+    let institution = payload["connection"]["institutionName"].as_str().unwrap_or("Plaid Sandbox institution");
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let mut account_ids = std::collections::HashMap::new();
+    for account in payload["accounts"].as_array().ok_or("Sandbox response has no accounts.")? {
+        let external_account_id = account["account_id"].as_str().ok_or("Sandbox account has no id.")?;
+        let existing: Option<String> = transaction.query_row(
+            "SELECT account_id FROM plaid_account_links WHERE plaid_connection_id = ?1 AND external_account_id = ?2",
+            (local_connection_id, external_account_id),
+            |row| row.get(0),
+        ).optional().map_err(|error| error.to_string())?;
+        let is_new = existing.is_none();
+        let account_id = existing.unwrap_or_else(new_id);
+        if is_new {
+            let name = account["name"].as_str().unwrap_or("Plaid account");
+            let account_type = account["subtype"].as_str().or_else(|| account["type"].as_str()).unwrap_or("other");
+            let local_name = format!("{institution} · {name}");
+            transaction.execute(
+                "INSERT INTO accounts(id, name, type, opening_balance_cents, reported_balance_cents) VALUES(?1, ?2, ?3, 0, ?4)",
+                (&account_id, &local_name, account_type, cents(&account["balances"]["current"])),
+            ).map_err(|error| error.to_string())?;
+            transaction.execute(
+                "INSERT INTO plaid_account_links(plaid_connection_id, external_account_id, account_id) VALUES(?1, ?2, ?3)",
+                (local_connection_id, external_account_id, &account_id),
+            ).map_err(|error| error.to_string())?;
+        } else {
+            transaction.execute(
+                "UPDATE accounts SET reported_balance_cents = ?1 WHERE id = ?2",
+                (cents(&account["balances"]["current"]), &account_id),
+            ).map_err(|error| error.to_string())?;
+        }
+        account_ids.insert(external_account_id.to_owned(), account_id);
+    }
+
+    let source = format!("plaid-sandbox:{local_connection_id}");
+    let mut imported = 0;
+    for item in payload["added"].as_array().into_iter().flatten().chain(payload["modified"].as_array().into_iter().flatten()) {
+        let external_id = item["transaction_id"].as_str().ok_or("Sandbox transaction has no id.")?;
+        let Some(account_id) = item["account_id"].as_str().and_then(|value| account_ids.get(value)) else { continue; };
+        let amount = cents(&item["amount"]).ok_or("Sandbox transaction amount is invalid.")?;
+        transaction.execute(
+            "INSERT INTO transactions(id, account_id, transaction_date, description, amount_cents, source, external_transaction_id)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(source, external_transaction_id) DO UPDATE SET
+               account_id = excluded.account_id, transaction_date = excluded.transaction_date,
+               description = excluded.description, amount_cents = excluded.amount_cents,
+               updated_at = CURRENT_TIMESTAMP",
+            (new_id(), account_id, item["date"].as_str().unwrap_or("1970-01-01"), item["name"].as_str().unwrap_or("Plaid transaction"), -amount, &source, external_id),
+        ).map_err(|error| error.to_string())?;
+        imported += 1;
+    }
+    for item in payload["removed"].as_array().into_iter().flatten() {
+        if let Some(external_id) = item["transaction_id"].as_str() {
+            transaction.execute("DELETE FROM transactions WHERE source = ?1 AND external_transaction_id = ?2", (&source, external_id))
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(imported)
+}
+
+#[tauri::command]
+async fn create_plaid_sandbox_link_session() -> Result<SandboxLinkSession, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let payload = broker_post("link-token", Value::Object(Default::default()), None)?;
+        Ok(SandboxLinkSession {
+            link_token: payload["linkToken"].as_str().ok_or("Sandbox broker returned no Link token.")?.to_owned(),
+            session_id: payload["sessionId"].as_str().ok_or("Sandbox broker returned no session id.")?.to_owned(),
+            session_secret: payload["sessionSecret"].as_str().ok_or("Sandbox broker returned no session key.")?.to_owned(),
+            expiration: payload["expiration"].as_str().unwrap_or_default().to_owned(),
+        })
+    }).await.map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkInput) -> Result<usize, String> {
+    let session_id = input.session_id.clone();
+    let session_secret = input.session_secret.clone();
+    let broker_response = tauri::async_runtime::spawn_blocking(move || {
+        broker_post("link-complete", serde_json::json!({
+            "sessionId": input.session_id,
+            "sessionSecret": input.session_secret,
+            "publicToken": input.public_token,
+            "institution": { "institution_id": input.institution_id, "name": input.institution_name }
+        }), None)
+    }).await.map_err(|error| error.to_string())??;
+    let broker_connection_id = broker_response["connection"]["id"].as_str().ok_or("Sandbox broker returned no connection id.")?;
+    let connection_secret = broker_response["connection"]["connectionSecret"].as_str().ok_or("Sandbox broker returned no connection key.")?;
+    let institution_name = broker_response["connection"]["institutionName"].as_str().unwrap_or("Plaid Sandbox institution");
+    let (connection, _) = open_database(&app)?;
+    let local_connection_id = new_id();
+    connection.execute(
+        "INSERT INTO plaid_connections(id, broker_connection_id, connection_secret, institution_name, environment) VALUES(?1, ?2, ?3, ?4, 'sandbox')",
+        (&local_connection_id, broker_connection_id, connection_secret, institution_name),
+    ).map_err(|error| error.to_string())?;
+    let _ = (session_id, session_secret); // The completion request consumes this one-time session at the broker.
+    let payload = tauri::async_runtime::spawn_blocking({
+        let id = broker_connection_id.to_owned();
+        let key = connection_secret.to_owned();
+        move || broker_post(&format!("connections/{id}/sync"), Value::Object(Default::default()), Some(&key))
+    }).await.map_err(|error| error.to_string())??;
+    apply_plaid_sync(&app, &local_connection_id, &payload)
+}
+
 #[tauri::command]
 fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
     let payload: Value = reqwest::blocking::get(SANDBOX_BROKER_URL).map_err(|error| error.to_string())?
@@ -301,7 +467,7 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, delete_transaction, ledger_data, scheduled_data, create_schedule, import_plaid_sandbox])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, delete_transaction, ledger_data, scheduled_data, create_schedule, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }
