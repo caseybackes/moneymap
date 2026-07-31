@@ -1,0 +1,53 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="FamilyFinance.App.App"
+             RequestedThemeVariant="Dark">
+  <Application.Styles>
+    <FluentTheme />
+    <Style Selector="Window">
+      <Setter Property="Background" Value="#0D1117" />
+      <Setter Property="Foreground" Value="#E8EDF5" />
+    </Style>
+    <Style Selector="TextBlock">
+      <Setter Property="Foreground" Value="#E8EDF5" />
+    </Style>
+    <Style Selector="Button">
+      <Setter Property="Background" Value="#202936" />
+      <Setter Property="BorderBrush" Value="#344154" />
+      <Setter Property="Foreground" Value="#E8EDF5" />
+      <Setter Property="CornerRadius" Value="6" />
+      <Setter Property="Padding" Value="12,7" />
+    </Style>
+    <Style Selector="Button:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="#2A3646" />
+    </Style>
+    <Style Selector="TextBox">
+      <Setter Property="Background" Value="#151B24" />
+      <Setter Property="BorderBrush" Value="#344154" />
+      <Setter Property="Foreground" Value="#E8EDF5" />
+    </Style>
+    <Style Selector="ComboBox">
+      <Setter Property="Background" Value="#151B24" />
+      <Setter Property="Foreground" Value="#E8EDF5" />
+    </Style>
+    <Style Selector="Button.nav">
+      <Setter Property="Width" Value="42" />
+      <Setter Property="Height" Value="42" />
+      <Setter Property="FontSize" Value="20" />
+    </Style>
+    <Style Selector="Border.summary">
+      <Setter Property="Padding" Value="18" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Background" Value="#171E28" />
+      <Setter Property="BorderBrush" Value="#263243" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <Style Selector="TextBlock.label">
+      <Setter Property="Opacity" Value="0.7" />
+    </Style>
+    <Style Selector="TextBlock.value">
+      <Setter Property="FontSize" Value="28" />
+      <Setter Property="Margin" Value="0,8,0,0" />
+    </Style>
+  </Application.Styles>
+</Application>

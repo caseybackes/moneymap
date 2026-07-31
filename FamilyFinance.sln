@@ -1,0 +1,42 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FamilyFinance.App", "src\FamilyFinance.App\FamilyFinance.App.csproj", "{1F4760A8-68A3-4C02-A914-9ACD714E1B15}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FamilyFinance.Domain", "src\FamilyFinance.Domain\FamilyFinance.Domain.csproj", "{DCA0D5E6-0E0A-4B15-B6DC-39A9636A5377}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FamilyFinance.AI", "src\FamilyFinance.AI\FamilyFinance.AI.csproj", "{A53711AA-60FA-47A1-AD97-BFE2711EFCF1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FamilyFinance.Data", "src\FamilyFinance.Data\FamilyFinance.Data.csproj", "{99C14DA4-394A-457B-9591-8700A3D1D4B1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FamilyFinance.Domain.Tests", "tests\FamilyFinance.Domain.Tests\FamilyFinance.Domain.Tests.csproj", "{3C7B81CD-CCF6-4F9D-9C3C-39992DCE3EA3}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1F4760A8-68A3-4C02-A914-9ACD714E1B15}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1F4760A8-68A3-4C02-A914-9ACD714E1B15}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1F4760A8-68A3-4C02-A914-9ACD714E1B15}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1F4760A8-68A3-4C02-A914-9ACD714E1B15}.Release|Any CPU.Build.0 = Release|Any CPU
+		{DCA0D5E6-0E0A-4B15-B6DC-39A9636A5377}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DCA0D5E6-0E0A-4B15-B6DC-39A9636A5377}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DCA0D5E6-0E0A-4B15-B6DC-39A9636A5377}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DCA0D5E6-0E0A-4B15-B6DC-39A9636A5377}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A53711AA-60FA-47A1-AD97-BFE2711EFCF1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A53711AA-60FA-47A1-AD97-BFE2711EFCF1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A53711AA-60FA-47A1-AD97-BFE2711EFCF1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A53711AA-60FA-47A1-AD97-BFE2711EFCF1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{99C14DA4-394A-457B-9591-8700A3D1D4B1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{99C14DA4-394A-457B-9591-8700A3D1D4B1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{99C14DA4-394A-457B-9591-8700A3D1D4B1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{99C14DA4-394A-457B-9591-8700A3D1D4B1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3C7B81CD-CCF6-4F9D-9C3C-39992DCE3EA3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3C7B81CD-CCF6-4F9D-9C3C-39992DCE3EA3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3C7B81CD-CCF6-4F9D-9C3C-39992DCE3EA3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3C7B81CD-CCF6-4F9D-9C3C-39992DCE3EA3}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

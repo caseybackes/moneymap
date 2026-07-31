@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "family-finance-broker",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-31",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "BROKER_DB",
+      "database_name": "family-finance-broker",
+      "database_id": "fb39c075-a956-4488-a79c-88c172d57e81",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}
