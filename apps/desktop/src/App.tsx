@@ -8,7 +8,7 @@ type DashboardData = { incomeCents: number; spendingCents: number; accounts: Acc
 type LedgerData = { transactions: LedgerEntry[] };
 type Schedule = { id: string; accountId: string; startDate: string; nextOccurrence: string; description: string; amountCents: number; recurrence: string; accountName: string };
 type SandboxLinkSession = { linkToken: string; sessionId: string; sessionSecret: string; expiration: string };
-type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts";
+type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts" | "scenarios";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const formatMoney = (cents: number) => money.format(cents / 100);
@@ -30,6 +30,20 @@ function NetWorthChart({ netWorth, transactions }: { netWorth: number; transacti
   const path = points.map((point, index) => { const x = points.length === 1 ? 600 : (index / (points.length - 1)) * 600; const y = 132 - ((point.value - minimum) / span) * 104; return `${index ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`; }).join(" ");
   const area = `${path} L600 150 L0 150 Z`;
   return <div className="net-worth-chart"><svg viewBox="0 0 600 160" preserveAspectRatio="none" role="img" aria-label="Net worth over the selected time period"><defs><linearGradient id="net-worth-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#5bc9f5" stopOpacity=".32"/><stop offset="1" stopColor="#5bc9f5" stopOpacity="0"/></linearGradient></defs><path className="chart-area" d={area}/><path className="chart-line" d={path}/></svg><div><span>{points[0].date}</span><span>{points.at(-1)?.date}</span></div></div>;
+}
+
+function ScenarioModel({ netWorth, incomeCents, spendingCents }: { netWorth: number; incomeCents: number; spendingCents: number }) {
+  const [income, setIncome] = useState(incomeCents / 100);
+  const [spending, setSpending] = useState(spendingCents / 100);
+  const [seeded, setSeeded] = useState(false);
+  const [contribution, setContribution] = useState(0);
+  const [oneTime, setOneTime] = useState(0);
+  const [months, setMonths] = useState(12);
+  useEffect(() => { if (!seeded && (incomeCents !== 0 || spendingCents !== 0)) { setIncome(incomeCents / 100); setSpending(spendingCents / 100); setSeeded(true); } }, [incomeCents, spendingCents, seeded]);
+  const monthlyNet = income - spending - contribution;
+  const projection = Array.from({ length: months }, (_, index) => ({ month: index + 1, balance: netWorth / 100 + oneTime + monthlyNet * (index + 1) }));
+  const ending = projection.at(-1)?.balance ?? netWorth / 100 + oneTime;
+  return <div className="scenario-grid"><Widget title="Scenario inputs" className="scenario-inputs"><p className="empty-copy">Change the numbers. Your ledger stays untouched.</p><label>Monthly income<input type="number" step="0.01" value={income} onChange={event => setIncome(Number(event.target.value) || 0)} /></label><label>Monthly spending<input type="number" step="0.01" value={spending} onChange={event => setSpending(Number(event.target.value) || 0)} /></label><label>Additional monthly savings / debt payment<input type="number" step="0.01" value={contribution} onChange={event => setContribution(Number(event.target.value) || 0)} /></label><label>One-time change<input type="number" step="0.01" value={oneTime} onChange={event => setOneTime(Number(event.target.value) || 0)} /></label><label>Projection horizon<select value={months} onChange={event => setMonths(Number(event.target.value))}><option value={3}>3 months</option><option value={6}>6 months</option><option value={12}>12 months</option><option value={24}>24 months</option><option value={60}>5 years</option></select></label></Widget><Widget title="Projected balance" className="scenario-result"><strong className={`big-number ${ending >= 0 ? "positive" : "negative"}`}>{money.format(ending)}</strong><p>{money.format(monthlyNet)} net change per month · {months} month scenario</p><div className="scenario-chart">{projection.map(point => <div key={point.month} style={{ height: `${Math.max(6, Math.min(100, (Math.abs(point.balance) / Math.max(...projection.map(item => Math.abs(item.balance)), 1)) * 100))}%` }} title={`Month ${point.month}: ${money.format(point.balance)}`} />)}</div><div className="scenario-summary"><span>Start<strong>{formatMoney(netWorth)}</strong></span><span>One-time<strong>{money.format(oneTime)}</strong></span><span>End<strong>{money.format(ending)}</strong></span></div></Widget><Widget title="Monthly projection" className="scenario-table">{projection.map(point => <div key={point.month}><span>Month {point.month}</span><strong className={point.balance >= 0 ? "positive" : "negative"}>{money.format(point.balance)}</strong></div>)}</Widget></div>;
 }
 
 export function App() {
@@ -64,10 +78,10 @@ export function App() {
       <button className={`nav-button ${view === "ledger" ? "selected" : ""}`} onClick={() => setView("ledger")} aria-label="Ledger">☷</button>
       <button className={`nav-button ${view === "accounts" ? "selected" : ""}`} onClick={() => setView("accounts")} aria-label="Accounts">◎</button>
       <button className={`nav-button ${view === "scheduled" ? "selected" : ""}`} onClick={() => setView("scheduled")} aria-label="Scheduled transactions">⌁</button>
-      <button className="nav-button" aria-label="AI workspace">AI</button>
+      <button className={`nav-button ${view === "scenarios" ? "selected" : ""}`} onClick={() => setView("scenarios")} aria-label="Scenario modeling">AI</button>
     </aside>
     <section className="page">
-      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" ? "PLANNING" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : "Ledger"}</h1></div><button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : view === "accounts" ? "account" : "transaction")}>{view === "scheduled" ? "Add schedule" : view === "accounts" ? "Add account" : "Add transaction"}</button></header>
+      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" || view === "scenarios" ? "PLANNING" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : view === "scenarios" ? "Scenario modeling" : "Ledger"}</h1></div>{view !== "scenarios" ? <button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : view === "accounts" ? "account" : "transaction")}>{view === "scheduled" ? "Add schedule" : view === "accounts" ? "Add account" : "Add transaction"}</button> : null}</header>
       {error ? <p className="status error">Local data store unavailable: {error}</p> : null}
       {!dashboard && !error ? <p className="status">Opening encrypted local data store...</p> : null}
       {dashboard && view === "dashboard" ? <div className="dashboard-grid">
@@ -95,6 +109,7 @@ export function App() {
       {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} onMonthChange={setCalendarMonth} /> : null}
       {view === "scheduled" ? <Scheduled schedules={schedules} onEdit={(schedule) => { setEditingSchedule(schedule); setDialog("schedule"); }} onChanged={() => { refresh(); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
       {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} onAdd={() => setDialog("account")} onAdjust={(account) => { setAdjustingAccount(account); setDialog("adjustment"); }} /> : null}
+      {view === "scenarios" ? <ScenarioModel netWorth={netWorth} incomeCents={dashboard?.incomeCents ?? 0} spendingCents={dashboard?.spendingCents ?? 0} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
       {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} entry={editingTransaction} onClose={() => { setDialog(null); setEditingTransaction(null); }} onSaved={() => { setDialog(null); setEditingTransaction(null); refresh(); if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {dialog === "schedule" ? <ScheduleDialog accounts={dashboard?.accounts ?? []} schedule={editingSchedule} onClose={() => { setDialog(null); setEditingSchedule(null); }} onSaved={() => { setDialog(null); setEditingSchedule(null); setView("scheduled"); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
