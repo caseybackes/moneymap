@@ -17,6 +17,21 @@ function Widget({ title, children, className = "" }: { title: string; children: 
   return <section className={`widget ${className}`}><h2>{title}</h2>{children}</section>;
 }
 
+function NetWorthChart({ netWorth, transactions }: { netWorth: number; transactions: LedgerEntry[] }) {
+  const points = useMemo(() => {
+    const byDate = new Map<string, number>();
+    transactions.forEach(item => byDate.set(item.transactionDate, (byDate.get(item.transactionDate) ?? 0) + item.amountCents));
+    const changes = [...byDate.entries()].sort(([left], [right]) => left.localeCompare(right));
+    let running = netWorth - changes.reduce((sum, [, amount]) => sum + amount, 0);
+    const history = changes.map(([date, amount]) => ({ date, value: running += amount }));
+    return history.length ? history : [{ date: "Today", value: netWorth }];
+  }, [netWorth, transactions]);
+  const values = points.map(point => point.value); const minimum = Math.min(...values); const maximum = Math.max(...values); const span = Math.max(maximum - minimum, 1);
+  const path = points.map((point, index) => { const x = points.length === 1 ? 600 : (index / (points.length - 1)) * 600; const y = 132 - ((point.value - minimum) / span) * 104; return `${index ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`; }).join(" ");
+  const area = `${path} L600 150 L0 150 Z`;
+  return <div className="net-worth-chart"><svg viewBox="0 0 600 160" preserveAspectRatio="none" role="img" aria-label="Net worth over the selected time period"><defs><linearGradient id="net-worth-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#5bc9f5" stopOpacity=".32"/><stop offset="1" stopColor="#5bc9f5" stopOpacity="0"/></linearGradient></defs><path className="chart-area" d={area}/><path className="chart-line" d={path}/></svg><div><span>{points[0].date}</span><span>{points.at(-1)?.date}</span></div></div>;
+}
+
 export function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -56,7 +71,7 @@ export function App() {
       {dashboard && view === "dashboard" ? <div className="dashboard-grid">
         <Widget title="Net worth" className="net-worth-widget">
           <strong className="big-number">{formatMoney(netWorth)}</strong><p>Across all local accounts</p>
-          <div className="sparkline" aria-label="Net worth history placeholder"><span /><span /><span /><span /><span /></div>
+          <NetWorthChart netWorth={netWorth} transactions={periodTransactions} />
         </Widget>
         <Widget title="This month" className="month-widget">
           <div className="metric"><span>Income</span><strong className="positive">{formatMoney(periodIncome)}</strong></div>
