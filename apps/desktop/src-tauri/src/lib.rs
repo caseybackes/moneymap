@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use keyring::Entry;
 use rand::RngCore;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use tauri::{AppHandle, Manager};
 
@@ -43,6 +43,31 @@ struct DashboardData {
     spending_cents: i64,
     accounts: Vec<DashboardAccount>,
     recent_transactions: Vec<DashboardTransaction>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateAccountInput {
+    name: String,
+    account_type: String,
+    opening_balance_cents: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateTransactionInput {
+    account_id: String,
+    transaction_date: String,
+    description: String,
+    amount_cents: i64,
+    category_id: Option<String>,
+    notes: Option<String>,
+}
+
+fn new_id() -> String {
+    let mut bytes = [0_u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    STANDARD_NO_PAD.encode(bytes)
 }
 
 fn database_key() -> Result<String, String> {
@@ -147,9 +172,42 @@ fn dashboard_data(app: AppHandle) -> Result<DashboardData, String> {
     Ok(DashboardData { income_cents, spending_cents, accounts, recent_transactions })
 }
 
+#[tauri::command]
+fn create_account(app: AppHandle, input: CreateAccountInput) -> Result<String, String> {
+    let name = input.name.trim();
+    if name.is_empty() { return Err("An account name is required.".into()); }
+    if input.account_type.trim().is_empty() { return Err("An account type is required.".into()); }
+    let (connection, _) = open_database(&app)?;
+    let id = new_id();
+    connection.execute(
+        "INSERT INTO accounts(id, name, type, opening_balance_cents) VALUES (?1, ?2, ?3, ?4)",
+        (&id, name, input.account_type.trim(), input.opening_balance_cents),
+    ).map_err(|error| error.to_string())?;
+    Ok(id)
+}
+
+#[tauri::command]
+fn create_transaction(app: AppHandle, input: CreateTransactionInput) -> Result<String, String> {
+    if input.description.trim().is_empty() { return Err("A transaction description is required.".into()); }
+    if !input.transaction_date.chars().all(|character| character.is_ascii_digit() || character == '-') || input.transaction_date.len() != 10 {
+        return Err("Transaction date must use YYYY-MM-DD.".into());
+    }
+    let (connection, _) = open_database(&app)?;
+    let exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?1)", [&input.account_id], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if !exists { return Err("Choose an existing account.".into()); }
+    let id = new_id();
+    connection.execute(
+        "INSERT INTO transactions(id, account_id, transaction_date, description, amount_cents, category_id, notes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        (&id, &input.account_id, &input.transaction_date, input.description.trim(), input.amount_cents, input.category_id, input.notes),
+    ).map_err(|error| error.to_string())?;
+    Ok(id)
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }
