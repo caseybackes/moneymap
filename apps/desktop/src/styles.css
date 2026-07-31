@@ -13,3 +13,22 @@
 .popover-item small{display:block;color:#8fa1b6;font-size:11px;margin-top:3px}
 .accounts-toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid #35455b}.accounts-toolbar .empty-copy{margin:0}.accounts-toolbar .primary-action:disabled{opacity:.65;cursor:wait}
 .connected-institutions{display:grid;gap:1px;background:#35455b;border-bottom:1px solid #35455b}.connected-institutions>div{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:12px 18px;background:#18212d}.connected-institutions small{display:block;margin-top:4px;color:#8fa1b6;font-size:11px;text-transform:capitalize}.connected-institutions button{border:1px solid #7e4d55;border-radius:6px;background:#202b39;color:#ffb1aa;padding:6px 9px;font-size:12px;cursor:pointer}.connected-institutions button:disabled{opacity:.6;cursor:wait}
+.account-card em{display:block;margin-top:5px;color:#8fa1b6;font-size:11px;font-style:normal}
+
+/* Dashboard board: bounded widgets fill the viewport and empty sections are omitted in App.tsx. */
+.dashboard-grid{grid-template-columns:minmax(0,1.08fr) minmax(340px,.92fr);grid-auto-flow:row dense;align-items:stretch}
+.dashboard-grid>.widget{min-height:0}
+.net-worth-widget{min-height:270px}
+.month-widget{min-height:270px}
+.accounts-widget{grid-column:auto;min-height:238px}
+.recent-widget{min-height:238px}
+.account-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.account-card,.connect-card{width:auto;min-height:108px}
+.account-card h3{margin-bottom:13px}
+.upcoming-widget{min-height:184px}
+.upcoming-list{display:grid;gap:2px}
+.upcoming-row{display:flex;justify-content:space-between;gap:14px;align-items:center;padding:10px 0;border-bottom:1px solid #2b3a4e}
+.upcoming-row:last-child{border-bottom:0}
+.upcoming-row small{display:block;margin-top:4px;color:#8fa1b6;font-size:11px}
+.suggestions-widget{grid-column:auto;min-height:184px}
+@media(max-width:1050px){.dashboard-grid{grid-template-columns:1fr}.accounts-widget,.suggestions-widget{grid-column:auto}.account-grid{grid-template-columns:repeat(auto-fit,minmax(185px,1fr))}}

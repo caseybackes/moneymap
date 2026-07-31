@@ -27,6 +27,16 @@ struct DashboardAccount {
     name: String,
     account_type: String,
     balance_cents: i64,
+    /// Present only for Plaid-synced accounts. Manual accounts deliberately
+    /// continue to use the same dashboard model with these fields absent.
+    plaid_connection_id: Option<String>,
+    external_account_id: Option<String>,
+    plaid_account_type: Option<String>,
+    plaid_account_subtype: Option<String>,
+    mask: Option<String>,
+    current_balance_cents: Option<i64>,
+    available_balance_cents: Option<i64>,
+    balance_refreshed_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -221,6 +231,12 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
            plaid_connection_id TEXT NOT NULL REFERENCES plaid_connections(id) ON DELETE CASCADE,
            external_account_id TEXT NOT NULL,
            account_id TEXT NOT NULL REFERENCES accounts(id),
+           plaid_account_type TEXT,
+           plaid_account_subtype TEXT,
+           mask TEXT,
+           current_balance_cents INTEGER,
+           available_balance_cents INTEGER,
+           balance_refreshed_at TEXT,
            PRIMARY KEY(plaid_connection_id, external_account_id)
          );
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);"
@@ -243,6 +259,23 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
         connection.execute_batch("ALTER TABLE scheduled_transactions ADD COLUMN last_processed_occurrence TEXT; INSERT OR IGNORE INTO schema_migrations(version) VALUES (3);")
             .map_err(|error| error.to_string())?;
     }
+    let has_plaid_account_metadata: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('plaid_account_links') WHERE name = 'plaid_account_type')",
+        [],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !has_plaid_account_metadata {
+        connection.execute_batch(
+            "ALTER TABLE plaid_account_links ADD COLUMN plaid_account_type TEXT;
+             ALTER TABLE plaid_account_links ADD COLUMN plaid_account_subtype TEXT;
+             ALTER TABLE plaid_account_links ADD COLUMN mask TEXT;
+             ALTER TABLE plaid_account_links ADD COLUMN current_balance_cents INTEGER;
+             ALTER TABLE plaid_account_links ADD COLUMN available_balance_cents INTEGER;
+             ALTER TABLE plaid_account_links ADD COLUMN balance_refreshed_at TEXT;"
+        ).map_err(|error| error.to_string())?;
+    }
+    connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)", [])
+        .map_err(|error| error.to_string())?;
     Ok((connection, path.display().to_string()))
 }
 
@@ -268,14 +301,22 @@ fn dashboard_data(app: AppHandle) -> Result<DashboardData, String> {
     ).map_err(|error| error.to_string())?;
 
     let mut account_statement = connection.prepare(
-        "SELECT a.id, a.name, a.type, COALESCE(a.reported_balance_cents, a.opening_balance_cents + COALESCE(SUM(t.amount_cents), 0))
+        "SELECT a.id, a.name, a.type, COALESCE(a.reported_balance_cents, a.opening_balance_cents + COALESCE(SUM(t.amount_cents), 0)),
+                l.plaid_connection_id, l.external_account_id, l.plaid_account_type, l.plaid_account_subtype, l.mask,
+                l.current_balance_cents, l.available_balance_cents, l.balance_refreshed_at
          FROM accounts a
          LEFT JOIN transactions t ON t.account_id = a.id
-         GROUP BY a.id, a.name, a.type, a.opening_balance_cents
+         LEFT JOIN plaid_account_links l ON l.account_id = a.id
+         GROUP BY a.id, a.name, a.type, a.opening_balance_cents, a.reported_balance_cents,
+                  l.plaid_connection_id, l.external_account_id, l.plaid_account_type, l.plaid_account_subtype, l.mask,
+                  l.current_balance_cents, l.available_balance_cents, l.balance_refreshed_at
          ORDER BY a.name COLLATE NOCASE",
     ).map_err(|error| error.to_string())?;
     let accounts = account_statement.query_map([], |row| Ok(DashboardAccount {
         id: row.get(0)?, name: row.get(1)?, account_type: row.get(2)?, balance_cents: row.get(3)?,
+        plaid_connection_id: row.get(4)?, external_account_id: row.get(5)?, plaid_account_type: row.get(6)?,
+        plaid_account_subtype: row.get(7)?, mask: row.get(8)?, current_balance_cents: row.get(9)?,
+        available_balance_cents: row.get(10)?, balance_refreshed_at: row.get(11)?,
     })).map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
 
@@ -546,6 +587,13 @@ fn apply_plaid_sync(app: &AppHandle, local_connection_id: &str, payload: &Value)
     let mut account_ids = std::collections::HashMap::new();
     for account in payload["accounts"].as_array().ok_or("Sandbox response has no accounts.")? {
         let external_account_id = account["account_id"].as_str().ok_or("Sandbox account has no id.")?;
+        let name = account["name"].as_str().unwrap_or("Plaid account");
+        let plaid_account_type = account["type"].as_str();
+        let plaid_account_subtype = account["subtype"].as_str();
+        let account_type = plaid_account_subtype.or(plaid_account_type).unwrap_or("other");
+        let mask = account["mask"].as_str();
+        let current_balance_cents = cents(&account["balances"]["current"]);
+        let available_balance_cents = cents(&account["balances"]["available"]);
         let existing: Option<String> = transaction.query_row(
             "SELECT account_id FROM plaid_account_links WHERE plaid_connection_id = ?1 AND external_account_id = ?2",
             (local_connection_id, external_account_id),
@@ -554,21 +602,35 @@ fn apply_plaid_sync(app: &AppHandle, local_connection_id: &str, payload: &Value)
         let is_new = existing.is_none();
         let account_id = existing.unwrap_or_else(new_id);
         if is_new {
-            let name = account["name"].as_str().unwrap_or("Plaid account");
-            let account_type = account["subtype"].as_str().or_else(|| account["type"].as_str()).unwrap_or("other");
             let local_name = format!("{institution} · {name}");
             transaction.execute(
                 "INSERT INTO accounts(id, name, type, opening_balance_cents, reported_balance_cents) VALUES(?1, ?2, ?3, 0, ?4)",
-                (&account_id, &local_name, account_type, cents(&account["balances"]["current"])),
+                (&account_id, &local_name, account_type, current_balance_cents),
             ).map_err(|error| error.to_string())?;
             transaction.execute(
-                "INSERT INTO plaid_account_links(plaid_connection_id, external_account_id, account_id) VALUES(?1, ?2, ?3)",
-                (local_connection_id, external_account_id, &account_id),
+                "INSERT INTO plaid_account_links(
+                   plaid_connection_id, external_account_id, account_id, plaid_account_type, plaid_account_subtype,
+                   mask, current_balance_cents, available_balance_cents, balance_refreshed_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)",
+                (local_connection_id, external_account_id, &account_id, plaid_account_type, plaid_account_subtype,
+                 mask, current_balance_cents, available_balance_cents),
             ).map_err(|error| error.to_string())?;
         } else {
+            let local_name = format!("{} · {}", institution, name);
             transaction.execute(
-                "UPDATE accounts SET reported_balance_cents = ?1 WHERE id = ?2",
-                (cents(&account["balances"]["current"]), &account_id),
+                "UPDATE accounts
+                 SET name = ?1, type = ?2, reported_balance_cents = COALESCE(?3, reported_balance_cents)
+                 WHERE id = ?4",
+                (&local_name, account_type, current_balance_cents, &account_id),
+            ).map_err(|error| error.to_string())?;
+            transaction.execute(
+                "UPDATE plaid_account_links
+                 SET plaid_account_type = ?1, plaid_account_subtype = ?2, mask = ?3,
+                     current_balance_cents = ?4, available_balance_cents = ?5,
+                     balance_refreshed_at = CURRENT_TIMESTAMP
+                 WHERE plaid_connection_id = ?6 AND external_account_id = ?7",
+                (plaid_account_type, plaid_account_subtype, mask, current_balance_cents, available_balance_cents,
+                 local_connection_id, external_account_id),
             ).map_err(|error| error.to_string())?;
         }
         account_ids.insert(external_account_id.to_owned(), account_id);

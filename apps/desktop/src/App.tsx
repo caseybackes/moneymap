@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePlaidLink } from "react-plaid-link";
 
-type Account = { id: string; name: string; accountType: string; balanceCents: number };
+type Account = { id: string; name: string; accountType: string; balanceCents: number; plaidSubtype?: string | null; plaidMask?: string | null; plaidAvailableBalanceCents?: number | null; plaidRefreshedAt?: string | null };
 type LedgerEntry = { id: string; accountId: string; transactionDate: string; description: string; accountName: string; categoryName: string; categoryId: string | null; amountCents: number };
 type DashboardData = { incomeCents: number; spendingCents: number; accounts: Account[]; recentTransactions: LedgerEntry[] };
 type LedgerData = { transactions: LedgerEntry[] };
@@ -65,20 +65,18 @@ export function App() {
   const [suggestions, setSuggestions] = useState<RecurringSuggestion[]>([]);
   const [syncingAccounts, setSyncingAccounts] = useState(false);
   const [connections, setConnections] = useState<ConnectedInstitution[]>([]);
-  const [importing, setImporting] = useState(false);
   const [rangeMonths, setRangeMonths] = useState<number | null>(1);
 
   const refresh = useCallback(() => { void invoke<DashboardData>("dashboard_data").then(setDashboard).catch((reason: unknown) => setError(String(reason))); }, []);
   useEffect(refresh, [refresh]);
   useEffect(() => { void invoke<Category[]>("categories_data").then(setCategories).catch((reason: unknown) => setError(String(reason))); }, []);
   useEffect(() => { if (dashboard) void invoke<RecurringSuggestion[]>("recurring_suggestions").then(setSuggestions).catch((reason: unknown) => setError(String(reason))); }, [dashboard]);
-  useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); if (view === "scheduled" || view === "calendar") void invoke<Schedule[]>("scheduled_data").then(setSchedules).catch((reason: unknown) => setError(String(reason))); if (view === "accounts") void invoke<ConnectedInstitution[]>("plaid_connections_data").then(setConnections).catch((reason: unknown) => setError(String(reason))); }, [view]);
+  useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); if (view === "dashboard" || view === "scheduled" || view === "calendar") void invoke<Schedule[]>("scheduled_data").then(setSchedules).catch((reason: unknown) => setError(String(reason))); if (view === "accounts") void invoke<ConnectedInstitution[]>("plaid_connections_data").then(setConnections).catch((reason: unknown) => setError(String(reason))); }, [view]);
 
   const netWorth = useMemo(() => dashboard?.accounts.reduce((total, account) => total + account.balanceCents, 0) ?? 0, [dashboard]);
   const periodTransactions = useMemo(() => { if (!dashboard) return []; if (rangeMonths === null) return dashboard.recentTransactions; const start = new Date(); start.setMonth(start.getMonth() - rangeMonths); return dashboard.recentTransactions.filter(item => new Date(`${item.transactionDate}T12:00:00`) >= start); }, [dashboard, rangeMonths]);
   const periodIncome = periodTransactions.filter(item => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0);
   const periodSpending = -periodTransactions.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0);
-  async function importSandbox() { setImporting(true); setError(null); try { await invoke("import_plaid_sandbox"); refresh(); } catch (reason) { setError(String(reason)); } finally { setImporting(false); } }
   async function addSuggestedSchedule(item: RecurringSuggestion) { await invoke("create_schedule", { input: { accountId: item.accountId, startDate: item.nextOccurrence, description: item.description, amountCents: item.amountCents, recurrence: item.recurrence } }); setSuggestions(current => current.filter(candidate => !(candidate.accountId === item.accountId && candidate.description === item.description && candidate.amountCents === item.amountCents))); }
   async function syncConnectedAccounts() { setSyncingAccounts(true); setError(null); try { await invoke("sync_plaid_sandbox_connections"); refresh(); if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
   async function disconnectConnectedAccount(connection: ConnectedInstitution) { if (!confirm(`Disconnect ${connection.institutionName}? Local history will be kept, but future sync will stop.`)) return; setSyncingAccounts(true); try { await invoke("disconnect_plaid_sandbox_connection", { connectionId: connection.id }); setConnections(current => current.filter(item => item.id !== connection.id)); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
@@ -110,17 +108,17 @@ export function App() {
         </Widget>
         <Widget title="Accounts & cards" className="accounts-widget">
           <div className="account-grid">
-            {dashboard.accounts.map((account) => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong></article>)}
+            {dashboard.accounts.map((account) => <article className="account-card" key={account.id}><small>{account.plaidSubtype ?? account.accountType}{account.plaidMask ? ` · •••• ${account.plaidMask}` : ""}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong>{account.plaidAvailableBalanceCents !== null && account.plaidAvailableBalanceCents !== undefined ? <em>Available {formatMoney(account.plaidAvailableBalanceCents)}</em> : null}</article>)}
             <SandboxLinkButton onImported={refresh} />
-            <button className="connect-card secondary-connect" onClick={importSandbox} disabled={importing}><span>+</span><strong>{importing ? "Importing fixture…" : "Import Sandbox fixture"}</strong><small>Developer shortcut · no Trial slot</small></button>
           </div>
         </Widget>
         <Widget title="Recent transactions" className="recent-widget">
-          {dashboard.recentTransactions.length === 0 ? <p className="empty-copy">Add a transaction or connect an account to start your ledger.</p> : <div className="transaction-list">{dashboard.recentTransactions.map((item) => <div className="transaction-row" key={item.id}><div><strong>{item.description}</strong><small>{item.transactionDate} · {item.accountName}</small></div><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div>}
+          {dashboard.recentTransactions.length === 0 ? <p className="empty-copy">Add a transaction or connect an account to start your ledger.</p> : <div className="transaction-list">{dashboard.recentTransactions.slice(0, 5).map((item) => <div className="transaction-row" key={item.id}><div><strong>{item.description}</strong><small>{item.transactionDate} · {item.accountName}</small></div><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div>}
         </Widget>
-        <Widget title="Recurring suggestions" className="suggestions-widget">
+        {schedules.length > 0 ? <Widget title="Upcoming" className="upcoming-widget"><div className="upcoming-list">{[...schedules].sort((left, right) => left.nextOccurrence.localeCompare(right.nextOccurrence)).slice(0, 5).map(item => <div className="upcoming-row" key={item.id}><div><strong>{item.description}</strong><small>{item.nextOccurrence} - {item.accountName} - {item.recurrence}</small></div><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div></Widget> : null}
+        {suggestions.length > 0 ? <Widget title="Recurring suggestions" className="suggestions-widget">
           {suggestions.length === 0 ? <p className="empty-copy">No clear recurring patterns to review.</p> : <div className="suggestion-list">{suggestions.map(item => <div className="suggestion-row" key={`${item.accountId}:${item.description}:${item.amountCents}`}><div><strong>{item.description}</strong><small>{item.accountName} · {formatMoney(item.amountCents)} · {item.recurrence} · next {item.nextOccurrence}</small></div><span><button onClick={() => setSuggestions(current => current.filter(candidate => candidate !== item))}>Dismiss</button><button className="primary-action" onClick={() => void addSuggestedSchedule(item)}>Add schedule</button></span></div>)}</div>}
-        </Widget>
+        </Widget> : null}
       </div> : null}
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onEdit={(entry) => { setEditingTransaction(entry); setDialog("transaction"); }} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} schedules={schedules} onMonthChange={setCalendarMonth} /> : null}
