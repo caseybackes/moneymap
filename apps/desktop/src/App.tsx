@@ -4,6 +4,8 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 type Account = { id: string; name: string; accountType: string; balanceCents: number };
 type LedgerEntry = { id: string; transactionDate: string; description: string; accountName: string; amountCents: number };
 type DashboardData = { incomeCents: number; spendingCents: number; accounts: Account[]; recentTransactions: LedgerEntry[] };
+type LedgerData = { transactions: LedgerEntry[] };
+type View = "dashboard" | "ledger";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const formatMoney = (cents: number) => money.format(cents / 100);
@@ -16,27 +18,30 @@ export function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"account" | "transaction" | null>(null);
+  const [view, setView] = useState<View>("dashboard");
+  const [ledger, setLedger] = useState<LedgerData | null>(null);
 
   const refresh = useCallback(() => { void invoke<DashboardData>("dashboard_data").then(setDashboard).catch((reason: unknown) => setError(String(reason))); }, []);
   useEffect(refresh, [refresh]);
+  useEffect(() => { if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); }, [view]);
 
   const netWorth = useMemo(() => dashboard?.accounts.reduce((total, account) => total + account.balanceCents, 0) ?? 0, [dashboard]);
 
   return <main className="app-shell">
     <aside className="rail" aria-label="Primary navigation">
       <div className="brand-mark">F</div>
-      <button className="nav-button selected" aria-label="Dashboard">▦</button>
+      <button className={`nav-button ${view === "dashboard" ? "selected" : ""}`} onClick={() => setView("dashboard")} aria-label="Dashboard">▦</button>
       <button className="nav-button" aria-label="Calendar">□</button>
-      <button className="nav-button" aria-label="Ledger">☷</button>
+      <button className={`nav-button ${view === "ledger" ? "selected" : ""}`} onClick={() => setView("ledger")} aria-label="Ledger">☷</button>
       <button className="nav-button" aria-label="Accounts">◎</button>
       <button className="nav-button" aria-label="Scheduled transactions">⌁</button>
       <button className="nav-button" aria-label="AI workspace">AI</button>
     </aside>
     <section className="page">
-      <header className="page-header"><div><p className="eyebrow">OVERVIEW</p><h1>Dashboard</h1></div><button className="primary-action" onClick={() => setDialog("transaction")}>Add transaction</button></header>
+      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : "Ledger"}</h1></div><button className="primary-action" onClick={() => setDialog("transaction")}>Add transaction</button></header>
       {error ? <p className="status error">Local data store unavailable: {error}</p> : null}
       {!dashboard && !error ? <p className="status">Opening encrypted local data store...</p> : null}
-      {dashboard ? <div className="dashboard-grid">
+      {dashboard && view === "dashboard" ? <div className="dashboard-grid">
         <Widget title="Net worth" className="net-worth-widget">
           <strong className="big-number">{formatMoney(netWorth)}</strong><p>Across all local accounts</p>
           <div className="sparkline" aria-label="Net worth history placeholder"><span /><span /><span /><span /><span /></div>
@@ -56,10 +61,15 @@ export function App() {
           {dashboard.recentTransactions.length === 0 ? <p className="empty-copy">Add a transaction or connect an account to start your ledger.</p> : <div className="transaction-list">{dashboard.recentTransactions.map((item) => <div className="transaction-row" key={item.id}><div><strong>{item.description}</strong><small>{item.transactionDate} · {item.accountName}</small></div><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div>}
         </Widget>
       </div> : null}
+      {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
       {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
     </section>
   </main>;
+}
+
+function Ledger({ transactions }: { transactions: LedgerEntry[] }) {
+  return <section className="ledger-widget"><div className="ledger-toolbar"><input aria-label="Search transactions" placeholder="Search transactions" /><span>{transactions.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span></div>{transactions.length === 0 ? <p className="empty-copy">Your ledger is empty.</p> : transactions.map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><strong>{item.description}</strong><span>{item.accountName}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div></section>;
 }
 
 function AccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {

@@ -45,6 +45,12 @@ struct DashboardData {
     recent_transactions: Vec<DashboardTransaction>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LedgerData {
+    transactions: Vec<DashboardTransaction>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateAccountInput {
@@ -205,9 +211,24 @@ fn create_transaction(app: AppHandle, input: CreateTransactionInput) -> Result<S
     Ok(id)
 }
 
+#[tauri::command]
+fn ledger_data(app: AppHandle) -> Result<LedgerData, String> {
+    let (connection, _) = open_database(&app)?;
+    let mut statement = connection.prepare(
+        "SELECT t.id, t.transaction_date, t.description, a.name, t.amount_cents
+         FROM transactions t JOIN accounts a ON a.id = t.account_id
+         ORDER BY t.transaction_date DESC, t.created_at DESC",
+    ).map_err(|error| error.to_string())?;
+    let transactions = statement.query_map([], |row| Ok(DashboardTransaction {
+        id: row.get(0)?, transaction_date: row.get(1)?, description: row.get(2)?, account_name: row.get(3)?, amount_cents: row.get(4)?,
+    })).map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok(LedgerData { transactions })
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, ledger_data])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }
