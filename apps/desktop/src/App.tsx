@@ -10,6 +10,7 @@ type Schedule = { id: string; accountId: string; startDate: string; nextOccurren
 type SandboxLinkSession = { linkToken: string; sessionId: string; sessionSecret: string; expiration: string };
 type Category = { id: string; name: string };
 type RecurringSuggestion = { accountId: string; accountName: string; description: string; amountCents: number; recurrence: string; nextOccurrence: string; occurrences: number };
+type CalendarItem = { id: string; description: string; amountCents: number; scheduled?: boolean };
 type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts" | "scenarios" | "categories";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
@@ -68,7 +69,7 @@ export function App() {
   useEffect(refresh, [refresh]);
   useEffect(() => { void invoke<Category[]>("categories_data").then(setCategories).catch((reason: unknown) => setError(String(reason))); }, []);
   useEffect(() => { if (dashboard) void invoke<RecurringSuggestion[]>("recurring_suggestions").then(setSuggestions).catch((reason: unknown) => setError(String(reason))); }, [dashboard]);
-  useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); if (view === "scheduled") void invoke<Schedule[]>("scheduled_data").then(setSchedules).catch((reason: unknown) => setError(String(reason))); }, [view]);
+  useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); if (view === "scheduled" || view === "calendar") void invoke<Schedule[]>("scheduled_data").then(setSchedules).catch((reason: unknown) => setError(String(reason))); }, [view]);
 
   const netWorth = useMemo(() => dashboard?.accounts.reduce((total, account) => total + account.balanceCents, 0) ?? 0, [dashboard]);
   const periodTransactions = useMemo(() => { if (!dashboard) return []; if (rangeMonths === null) return dashboard.recentTransactions; const start = new Date(); start.setMonth(start.getMonth() - rangeMonths); return dashboard.recentTransactions.filter(item => new Date(`${item.transactionDate}T12:00:00`) >= start); }, [dashboard, rangeMonths]);
@@ -117,7 +118,7 @@ export function App() {
         </Widget>
       </div> : null}
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onEdit={(entry) => { setEditingTransaction(entry); setDialog("transaction"); }} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
-      {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} onMonthChange={setCalendarMonth} /> : null}
+      {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} schedules={schedules} onMonthChange={setCalendarMonth} /> : null}
       {view === "scheduled" ? <Scheduled schedules={schedules} onEdit={(schedule) => { setEditingSchedule(schedule); setDialog("schedule"); }} onChanged={() => { refresh(); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
       {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} onAdd={() => setDialog("account")} onAdjust={(account) => { setAdjustingAccount(account); setDialog("adjustment"); }} /> : null}
       {view === "scenarios" ? <ScenarioModel netWorth={netWorth} incomeCents={dashboard?.incomeCents ?? 0} spendingCents={dashboard?.spendingCents ?? 0} /> : null}
@@ -201,7 +202,7 @@ function PlaidLinkLauncher({ session, onDone, onCancelled }: { session: SandboxL
   return <div className="connect-card sandbox-link-card"><span>↗</span><strong>{status}</strong><small>{ready ? "Complete or cancel the Plaid window." : "Loading Plaid Link…"}</small></div>;
 }
 
-function Calendar({ month, transactions, onMonthChange }: { month: Date; transactions: LedgerEntry[]; onMonthChange: (month: Date) => void }) {
+function Calendar({ month, transactions, schedules, onMonthChange }: { month: Date; transactions: LedgerEntry[]; schedules: Schedule[]; onMonthChange: (month: Date) => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [offset, setOffset] = useState(0);
   const [settling, setSettling] = useState(false);
@@ -210,15 +211,25 @@ function Calendar({ month, transactions, onMonthChange }: { month: Date; transac
   const year = month.getFullYear(); const monthIndex = month.getMonth();
   const first = new Date(year, monthIndex, 1); const start = new Date(year, monthIndex, 1 - first.getDay());
   const monthTitle = month.toLocaleString("en-US", { month: "long", year: "numeric" });
-  const transactionMap = new Map<string, LedgerEntry[]>();
+  const transactionMap = new Map<string, CalendarItem[]>();
   transactions.forEach(item => transactionMap.set(item.transactionDate, [...(transactionMap.get(item.transactionDate) ?? []), item]));
-  const selectedItems = selected ? transactionMap.get(selected) ?? [] : [];
+  function scheduledEntriesFor(key: string): CalendarItem[] {
+    const candidate = new Date(`${key}T12:00:00`);
+    return schedules.filter(schedule => {
+      const firstOccurrence = new Date(`${schedule.nextOccurrence}T12:00:00`);
+      if (candidate < firstOccurrence) return false;
+      const days = Math.round((candidate.getTime() - firstOccurrence.getTime()) / 86400000);
+      if (schedule.recurrence === "weekly") return days % 7 === 0;
+      return candidate.getDate() === firstOccurrence.getDate() && (candidate.getFullYear() - firstOccurrence.getFullYear()) * 12 + candidate.getMonth() - firstOccurrence.getMonth() >= 0;
+    }).map(schedule => ({ id: `scheduled:${schedule.id}:${key}`, description: schedule.description, amountCents: schedule.amountCents, scheduled: true }));
+  }
+  const selectedItems = selected ? [...(transactionMap.get(selected) ?? []), ...scheduledEntriesFor(selected)] : [];
   useEffect(() => { if (!selected) return; const close = (event: PointerEvent) => { if (surfaceRef.current && !surfaceRef.current.contains(event.target as Node)) setSelected(null); }; document.addEventListener("pointerdown", close); return () => document.removeEventListener("pointerdown", close); }, [selected]);
   function changeMonth(delta: number) { setSelected(null); onMonthChange(new Date(year, monthIndex + delta, 1)); }
   function onPointerDown(event: React.PointerEvent<HTMLElement>) { if ((event.target as HTMLElement).closest("button")) return; const width = event.currentTarget.getBoundingClientRect().width; dragRef.current = { pointerId: event.pointerId, startX: event.clientX, width }; event.currentTarget.setPointerCapture(event.pointerId); }
   function onPointerMove(event: React.PointerEvent<HTMLElement>) { const drag = dragRef.current; if (!drag || drag.pointerId !== event.pointerId) return; setOffset(Math.max(-drag.width, Math.min(drag.width, event.clientX - drag.startX))); }
   function onPointerUp(event: React.PointerEvent<HTMLElement>) { const drag = dragRef.current; if (!drag || drag.pointerId !== event.pointerId) return; dragRef.current = null; const releaseOffset = event.clientX - drag.startX; const direction = Math.abs(releaseOffset) > drag.width / 2 ? (releaseOffset < 0 ? 1 : -1) : 0; setSettling(true); if (!direction) { setOffset(0); window.setTimeout(() => setSettling(false), 380); return; } setOffset(direction > 0 ? -drag.width : drag.width); window.setTimeout(() => { changeMonth(direction); setSettling(false); setOffset(0); }, 380); }
-  return <section className="calendar-widget" ref={surfaceRef}><div className="calendar-controls"><button onClick={() => changeMonth(-1)}>‹</button><strong>{monthTitle}</strong><button onClick={() => changeMonth(1)}>›</button></div><div className="calendar-viewport" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}><div className={`calendar-grid ${settling ? "settling" : ""}`} style={{ transform: `translateX(${offset}px)` }}>{["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(day => <div className="calendar-day-name" key={day}>{day}</div>)}{Array.from({ length: 42 }, (_, index) => { const date = new Date(start); date.setDate(start.getDate() + index); const key = date.toISOString().slice(0, 10); const entries = transactionMap.get(key) ?? []; const income = entries.filter(item => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0); const spend = entries.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0); return <button className={`calendar-cell ${date.getMonth() !== monthIndex ? "outside" : ""} ${selected === key ? "selected-cell" : ""}`} onClick={() => setSelected(key)} key={key}><span>{date.getDate()}</span>{income ? <small className="positive">+{formatMoney(income)}</small> : null}{spend ? <small className="negative">{formatMoney(spend)}</small> : null}</button>; })}</div></div>{selected ? <aside className="date-popover"><header><strong>{new Date(`${selected}T12:00:00`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</strong><button onClick={() => setSelected(null)}>×</button></header>{selectedItems.length === 0 ? <p className="empty-copy">No transactions.</p> : selectedItems.map(item => <div className="popover-item" key={item.id}><span>{item.description}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</aside> : null}</section>;
+  return <section className="calendar-widget" ref={surfaceRef}><div className="calendar-controls"><button onClick={() => changeMonth(-1)}>‹</button><strong>{monthTitle}</strong><button onClick={() => changeMonth(1)}>›</button></div><div className="calendar-viewport" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}><div className={`calendar-grid ${settling ? "settling" : ""}`} style={{ transform: `translateX(${offset}px)` }}>{["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(day => <div className="calendar-day-name" key={day}>{day}</div>)}{Array.from({ length: 42 }, (_, index) => { const date = new Date(start); date.setDate(start.getDate() + index); const key = date.toISOString().slice(0, 10); const entries = [...(transactionMap.get(key) ?? []), ...scheduledEntriesFor(key)]; const income = entries.filter(item => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0); const spend = entries.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0); return <button className={`calendar-cell ${date.getMonth() !== monthIndex ? "outside" : ""} ${selected === key ? "selected-cell" : ""}`} onClick={() => setSelected(key)} key={key}><span>{date.getDate()}</span>{income ? <small className="positive">+{formatMoney(income)}</small> : null}{spend ? <small className="negative">{formatMoney(spend)}</small> : null}</button>; })}</div></div>{selected ? <aside className="date-popover"><header><strong>{new Date(`${selected}T12:00:00`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</strong><button onClick={() => setSelected(null)}>×</button></header>{selectedItems.length === 0 ? <p className="empty-copy">No transactions or planned items.</p> : selectedItems.map(item => <div className="popover-item" key={item.id}><span>{item.description}{item.scheduled ? <small>Planned · scheduled</small> : null}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</aside> : null}</section>;
 }
 
 function AccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
