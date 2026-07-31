@@ -68,12 +68,19 @@ export function App() {
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [connections, setConnections] = useState<ConnectedInstitution[]>([]);
   const [rangeMonths, setRangeMonths] = useState<number | null>(1);
+  const storeEpoch = useRef(0);
 
-  const refresh = useCallback(() => { void invoke<DashboardData>("dashboard_data").then(setDashboard).catch((reason: unknown) => setError(String(reason))); }, []);
+  const refresh = useCallback(() => {
+    const epoch = storeEpoch.current;
+    void invoke<DashboardData>("dashboard_data").then((data) => {
+      if (epoch !== storeEpoch.current) return;
+      setDashboard(data); setError(null);
+    }).catch((reason: unknown) => { if (epoch === storeEpoch.current) setError(String(reason)); });
+  }, []);
   useEffect(refresh, [refresh]);
-  useEffect(() => { void invoke<Category[]>("categories_data").then(setCategories).catch((reason: unknown) => setError(String(reason))); }, []);
-  useEffect(() => { if (dashboard) void invoke<RecurringSuggestion[]>("recurring_suggestions").then(setSuggestions).catch((reason: unknown) => setError(String(reason))); }, [dashboard]);
-  useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); if (view === "dashboard" || view === "scheduled" || view === "calendar") void invoke<Schedule[]>("scheduled_data").then(setSchedules).catch((reason: unknown) => setError(String(reason))); if (view === "accounts") void invoke<ConnectedInstitution[]>("plaid_connections_data").then(setConnections).catch((reason: unknown) => setError(String(reason))); }, [view]);
+  useEffect(() => { const epoch = storeEpoch.current; void invoke<Category[]>("categories_data").then((data) => { if (epoch === storeEpoch.current) setCategories(data); }).catch((reason: unknown) => { if (epoch === storeEpoch.current) setError(String(reason)); }); }, []);
+  useEffect(() => { if (dashboard) { const epoch = storeEpoch.current; void invoke<RecurringSuggestion[]>("recurring_suggestions").then((data) => { if (epoch === storeEpoch.current) setSuggestions(data); }).catch((reason: unknown) => { if (epoch === storeEpoch.current) setError(String(reason)); }); } }, [dashboard]);
+  useEffect(() => { const epoch = storeEpoch.current; const report = (reason: unknown) => { if (epoch === storeEpoch.current) setError(String(reason)); }; if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then((data) => { if (epoch === storeEpoch.current) setLedger(data); }).catch(report); if (view === "dashboard" || view === "scheduled" || view === "calendar") void invoke<Schedule[]>("scheduled_data").then((data) => { if (epoch === storeEpoch.current) setSchedules(data); }).catch(report); if (view === "accounts") void invoke<ConnectedInstitution[]>("plaid_connections_data").then((data) => { if (epoch === storeEpoch.current) setConnections(data); }).catch(report); }, [view]);
 
   const netWorth = useMemo(() => dashboard?.accounts.reduce((total, account) => total + account.balanceCents, 0) ?? 0, [dashboard]);
   const periodTransactions = useMemo(() => { if (!dashboard) return []; if (rangeMonths === null) return dashboard.recentTransactions; const start = new Date(); start.setMonth(start.getMonth() - rangeMonths); return dashboard.recentTransactions.filter(item => new Date(`${item.transactionDate}T12:00:00`) >= start); }, [dashboard, rangeMonths]);
@@ -86,11 +93,12 @@ export function App() {
   async function recoverLocalStore() {
     if (!confirm("Start a fresh encrypted local store? The unreadable file will be preserved in the app data folder, but it cannot be used without its original encryption key.")) return;
     setRecoveringStore(true);
+    storeEpoch.current += 1;
+    setError(null);
     try {
       await invoke("reset_unavailable_database");
-      setError(null);
       refresh();
-      void invoke<Category[]>("categories_data").then(setCategories);
+      void invoke<Category[]>("categories_data").then(setCategories).catch((reason: unknown) => setError(String(reason)));
     } catch (reason) { setError(String(reason)); } finally { setRecoveringStore(false); }
   }
 

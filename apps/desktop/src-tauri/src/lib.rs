@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
+use std::io::Write;
 use tauri::{AppHandle, Manager};
 
 const KEYRING_SERVICE: &str = "com.caseybackes.family-finance";
@@ -178,7 +179,26 @@ fn database_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(directory.join("family-finance-v2.db"))
 }
 
+fn write_diagnostic(app: &AppHandle, event: &str) {
+    let Ok(directory) = app.path().app_local_data_dir() else { return; };
+    let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(directory.join("family-finance.log")) else { return; };
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "unknown-time".to_string());
+    let _ = writeln!(file, "{timestamp} {event}");
+}
+
 fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
+    let result = open_database_inner(app);
+    match &result {
+        Ok((_, path)) => write_diagnostic(app, &format!("database opened path={path}")),
+        Err(error) => write_diagnostic(app, &format!("database open failed error={error}")),
+    }
+    result
+}
+
+fn open_database_inner(app: &AppHandle) -> Result<(Connection, String), String> {
     let path = database_path(app)?;
     let key = database_key()?;
     let connection = Connection::open(&path).map_err(|error| error.to_string())?;
