@@ -215,7 +215,7 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
          CREATE TABLE IF NOT EXISTS scheduled_transactions (
            id TEXT PRIMARY KEY NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id), start_date TEXT NOT NULL,
            description TEXT NOT NULL, amount_cents INTEGER NOT NULL,
-           recurrence TEXT NOT NULL CHECK(recurrence IN ('weekly', 'monthly')), active INTEGER NOT NULL DEFAULT 1,
+           recurrence TEXT NOT NULL CHECK(recurrence IN ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'yearly')), active INTEGER NOT NULL DEFAULT 1,
            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          CREATE TABLE IF NOT EXISTS plaid_connections (
@@ -276,6 +276,29 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
     }
     connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (4)", [])
         .map_err(|error| error.to_string())?;
+    let has_extended_recurrences: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 5)",
+        [],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !has_extended_recurrences {
+        connection.execute_batch(
+            "BEGIN;
+             CREATE TABLE scheduled_transactions_recurrence_v5 (
+               id TEXT PRIMARY KEY NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id), start_date TEXT NOT NULL,
+               description TEXT NOT NULL, amount_cents INTEGER NOT NULL,
+               recurrence TEXT NOT NULL CHECK(recurrence IN ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'yearly')),
+               active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               last_processed_occurrence TEXT
+             );
+             INSERT INTO scheduled_transactions_recurrence_v5(id, account_id, start_date, description, amount_cents, recurrence, active, created_at, last_processed_occurrence)
+             SELECT id, account_id, start_date, description, amount_cents, recurrence, active, created_at, last_processed_occurrence FROM scheduled_transactions;
+             DROP TABLE scheduled_transactions;
+             ALTER TABLE scheduled_transactions_recurrence_v5 RENAME TO scheduled_transactions;
+             INSERT INTO schema_migrations(version) VALUES (5);
+             COMMIT;"
+        ).map_err(|error| error.to_string())?;
+    }
     Ok((connection, path.display().to_string()))
 }
 
@@ -485,8 +508,13 @@ fn recurring_suggestions(app: AppHandle) -> Result<Vec<RecurringSuggestion>, Str
 fn scheduled_data(app: AppHandle) -> Result<Vec<ScheduledEntry>, String> {
     let (connection, _) = open_database(&app)?;
     let mut statement = connection.prepare("SELECT s.id, s.account_id, s.start_date,
-      CASE s.recurrence WHEN 'weekly' THEN date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-7 days')), '+7 days')
-                        ELSE date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-1 month')), '+1 month') END,
+      CASE s.recurrence
+        WHEN 'daily' THEN date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-1 day')), '+1 day')
+        WHEN 'weekly' THEN date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-7 days')), '+7 days')
+        WHEN 'biweekly' THEN date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-14 days')), '+14 days')
+        WHEN 'monthly' THEN date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-1 month')), '+1 month')
+        WHEN 'quarterly' THEN date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-3 months')), '+3 months')
+        ELSE date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-1 year')), '+1 year') END,
       s.description, s.amount_cents, s.recurrence, a.name
       FROM scheduled_transactions s JOIN accounts a ON a.id = s.account_id WHERE s.active = 1 ORDER BY 4, s.description")
         .map_err(|error| error.to_string())?;
@@ -499,7 +527,7 @@ fn scheduled_data(app: AppHandle) -> Result<Vec<ScheduledEntry>, String> {
 #[tauri::command]
 fn create_schedule(app: AppHandle, input: CreateScheduleInput) -> Result<String, String> {
     if input.description.trim().is_empty() { return Err("A scheduled transaction description is required.".into()); }
-    if !matches!(input.recurrence.as_str(), "weekly" | "monthly") { return Err("Choose weekly or monthly.".into()); }
+    if !matches!(input.recurrence.as_str(), "daily" | "weekly" | "biweekly" | "monthly" | "quarterly" | "yearly") { return Err("Choose a valid recurrence period.".into()); }
     let (connection, _) = open_database(&app)?;
     let id = new_id();
     connection.execute("INSERT INTO scheduled_transactions(id, account_id, start_date, description, amount_cents, recurrence) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", (&id, input.account_id, input.start_date, input.description.trim(), input.amount_cents, input.recurrence))
@@ -510,7 +538,7 @@ fn create_schedule(app: AppHandle, input: CreateScheduleInput) -> Result<String,
 #[tauri::command]
 fn update_schedule(app: AppHandle, input: UpdateScheduleInput) -> Result<(), String> {
     if input.description.trim().is_empty() { return Err("A scheduled transaction description is required.".into()); }
-    if !matches!(input.recurrence.as_str(), "weekly" | "monthly") { return Err("Choose weekly or monthly.".into()); }
+    if !matches!(input.recurrence.as_str(), "daily" | "weekly" | "biweekly" | "monthly" | "quarterly" | "yearly") { return Err("Choose a valid recurrence period.".into()); }
     let (connection, _) = open_database(&app)?;
     let updated = connection.execute(
         "UPDATE scheduled_transactions SET account_id = ?1, start_date = ?2, description = ?3, amount_cents = ?4, recurrence = ?5 WHERE id = ?6",
@@ -524,8 +552,13 @@ fn process_schedule(app: AppHandle, schedule_id: String, record: bool) -> Result
     let (connection, _) = open_database(&app)?;
     let schedule: Option<(String, String, String, i64, String)> = connection.query_row(
         "SELECT account_id,
-          CASE recurrence WHEN 'weekly' THEN date(COALESCE(last_processed_occurrence, date(start_date, '-7 days')), '+7 days')
-                            ELSE date(COALESCE(last_processed_occurrence, date(start_date, '-1 month')), '+1 month') END,
+          CASE recurrence
+            WHEN 'daily' THEN date(COALESCE(last_processed_occurrence, date(start_date, '-1 day')), '+1 day')
+            WHEN 'weekly' THEN date(COALESCE(last_processed_occurrence, date(start_date, '-7 days')), '+7 days')
+            WHEN 'biweekly' THEN date(COALESCE(last_processed_occurrence, date(start_date, '-14 days')), '+14 days')
+            WHEN 'monthly' THEN date(COALESCE(last_processed_occurrence, date(start_date, '-1 month')), '+1 month')
+            WHEN 'quarterly' THEN date(COALESCE(last_processed_occurrence, date(start_date, '-3 months')), '+3 months')
+            ELSE date(COALESCE(last_processed_occurrence, date(start_date, '-1 year')), '+1 year') END,
           description, amount_cents, recurrence
           FROM scheduled_transactions WHERE id = ?1 AND active = 1",
         [&schedule_id],
