@@ -69,7 +69,7 @@ struct LedgerData {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ScheduledEntry { id: String, account_id: String, start_date: String, next_occurrence: String, description: String, amount_cents: i64, recurrence: String, account_name: String }
+struct ScheduledEntry { id: String, account_id: String, start_date: String, end_date: Option<String>, next_occurrence: String, description: String, amount_cents: i64, recurrence: String, account_name: String }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,11 +144,11 @@ struct AdjustAccountBalanceInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateScheduleInput { account_id: String, start_date: String, description: String, amount_cents: i64, recurrence: String }
+struct CreateScheduleInput { account_id: String, start_date: String, end_date: Option<String>, description: String, amount_cents: i64, recurrence: String }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UpdateScheduleInput { id: String, account_id: String, start_date: String, description: String, amount_cents: i64, recurrence: String }
+struct UpdateScheduleInput { id: String, account_id: String, start_date: String, end_date: Option<String>, description: String, amount_cents: i64, recurrence: String }
 
 fn new_id() -> String {
     let mut bytes = [0_u8; 16];
@@ -213,7 +213,7 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
            UNIQUE(source, external_transaction_id)
          );
          CREATE TABLE IF NOT EXISTS scheduled_transactions (
-           id TEXT PRIMARY KEY NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id), start_date TEXT NOT NULL,
+           id TEXT PRIMARY KEY NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id), start_date TEXT NOT NULL, end_date TEXT,
            description TEXT NOT NULL, amount_cents INTEGER NOT NULL,
            recurrence TEXT NOT NULL CHECK(recurrence IN ('daily', 'weekly', 'biweekly', 'monthly', 'quarterly', 'yearly')), active INTEGER NOT NULL DEFAULT 1,
            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -299,6 +299,17 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
              COMMIT;"
         ).map_err(|error| error.to_string())?;
     }
+    let has_schedule_end_date: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('scheduled_transactions') WHERE name = 'end_date')",
+        [],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !has_schedule_end_date {
+        connection.execute_batch("ALTER TABLE scheduled_transactions ADD COLUMN end_date TEXT;")
+            .map_err(|error| error.to_string())?;
+    }
+    connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)", [])
+        .map_err(|error| error.to_string())?;
     Ok((connection, path.display().to_string()))
 }
 
@@ -507,7 +518,7 @@ fn recurring_suggestions(app: AppHandle) -> Result<Vec<RecurringSuggestion>, Str
 #[tauri::command]
 fn scheduled_data(app: AppHandle) -> Result<Vec<ScheduledEntry>, String> {
     let (connection, _) = open_database(&app)?;
-    let mut statement = connection.prepare("SELECT s.id, s.account_id, s.start_date,
+    let mut statement = connection.prepare("SELECT s.id, s.account_id, s.start_date, s.end_date,
       CASE s.recurrence
         WHEN 'daily' THEN date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-1 day')), '+1 day')
         WHEN 'weekly' THEN date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-7 days')), '+7 days')
@@ -516,11 +527,12 @@ fn scheduled_data(app: AppHandle) -> Result<Vec<ScheduledEntry>, String> {
         WHEN 'quarterly' THEN date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-3 months')), '+3 months')
         ELSE date(COALESCE(s.last_processed_occurrence, date(s.start_date, '-1 year')), '+1 year') END,
       s.description, s.amount_cents, s.recurrence, a.name
-      FROM scheduled_transactions s JOIN accounts a ON a.id = s.account_id WHERE s.active = 1 ORDER BY 4, s.description")
+      FROM scheduled_transactions s JOIN accounts a ON a.id = s.account_id WHERE s.active = 1 ORDER BY 5, s.description")
         .map_err(|error| error.to_string())?;
-    let rows = statement.query_map([], |row| Ok(ScheduledEntry { id: row.get(0)?, account_id: row.get(1)?, start_date: row.get(2)?, next_occurrence: row.get(3)?, description: row.get(4)?, amount_cents: row.get(5)?, recurrence: row.get(6)?, account_name: row.get(7)? }))
+    let rows = statement.query_map([], |row| Ok(ScheduledEntry { id: row.get(0)?, account_id: row.get(1)?, start_date: row.get(2)?, end_date: row.get(3)?, next_occurrence: row.get(4)?, description: row.get(5)?, amount_cents: row.get(6)?, recurrence: row.get(7)?, account_name: row.get(8)? }))
         .map_err(|error| error.to_string())?;
-    let entries = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let entries = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+        .into_iter().filter(|entry| entry.end_date.as_ref().map(|end| &entry.next_occurrence <= end).unwrap_or(true)).collect();
     Ok(entries)
 }
 
@@ -530,7 +542,8 @@ fn create_schedule(app: AppHandle, input: CreateScheduleInput) -> Result<String,
     if !matches!(input.recurrence.as_str(), "daily" | "weekly" | "biweekly" | "monthly" | "quarterly" | "yearly") { return Err("Choose a valid recurrence period.".into()); }
     let (connection, _) = open_database(&app)?;
     let id = new_id();
-    connection.execute("INSERT INTO scheduled_transactions(id, account_id, start_date, description, amount_cents, recurrence) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", (&id, input.account_id, input.start_date, input.description.trim(), input.amount_cents, input.recurrence))
+    if input.end_date.as_ref().is_some_and(|end| end < &input.start_date) { return Err("End date cannot be before the start date.".into()); }
+    connection.execute("INSERT INTO scheduled_transactions(id, account_id, start_date, end_date, description, amount_cents, recurrence) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", (&id, input.account_id, input.start_date, input.end_date, input.description.trim(), input.amount_cents, input.recurrence))
         .map_err(|error| error.to_string())?;
     Ok(id)
 }
@@ -540,9 +553,10 @@ fn update_schedule(app: AppHandle, input: UpdateScheduleInput) -> Result<(), Str
     if input.description.trim().is_empty() { return Err("A scheduled transaction description is required.".into()); }
     if !matches!(input.recurrence.as_str(), "daily" | "weekly" | "biweekly" | "monthly" | "quarterly" | "yearly") { return Err("Choose a valid recurrence period.".into()); }
     let (connection, _) = open_database(&app)?;
+    if input.end_date.as_ref().is_some_and(|end| end < &input.start_date) { return Err("End date cannot be before the start date.".into()); }
     let updated = connection.execute(
-        "UPDATE scheduled_transactions SET account_id = ?1, start_date = ?2, description = ?3, amount_cents = ?4, recurrence = ?5 WHERE id = ?6",
-        (&input.account_id, &input.start_date, input.description.trim(), input.amount_cents, &input.recurrence, &input.id),
+        "UPDATE scheduled_transactions SET account_id = ?1, start_date = ?2, end_date = ?3, description = ?4, amount_cents = ?5, recurrence = ?6 WHERE id = ?7",
+        (&input.account_id, &input.start_date, input.end_date, input.description.trim(), input.amount_cents, &input.recurrence, &input.id),
     ).map_err(|error| error.to_string())?;
     if updated != 1 { return Err("Scheduled transaction no longer exists.".into()); }
     Ok(())
@@ -550,7 +564,7 @@ fn update_schedule(app: AppHandle, input: UpdateScheduleInput) -> Result<(), Str
 
 fn process_schedule(app: AppHandle, schedule_id: String, record: bool) -> Result<String, String> {
     let (connection, _) = open_database(&app)?;
-    let schedule: Option<(String, String, String, i64, String)> = connection.query_row(
+    let schedule: Option<(String, String, Option<String>, String, i64, String)> = connection.query_row(
         "SELECT account_id,
           CASE recurrence
             WHEN 'daily' THEN date(COALESCE(last_processed_occurrence, date(start_date, '-1 day')), '+1 day')
@@ -559,12 +573,13 @@ fn process_schedule(app: AppHandle, schedule_id: String, record: bool) -> Result
             WHEN 'monthly' THEN date(COALESCE(last_processed_occurrence, date(start_date, '-1 month')), '+1 month')
             WHEN 'quarterly' THEN date(COALESCE(last_processed_occurrence, date(start_date, '-3 months')), '+3 months')
             ELSE date(COALESCE(last_processed_occurrence, date(start_date, '-1 year')), '+1 year') END,
-          description, amount_cents, recurrence
+          end_date, description, amount_cents, recurrence
           FROM scheduled_transactions WHERE id = ?1 AND active = 1",
         [&schedule_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
     ).optional().map_err(|error| error.to_string())?;
-    let Some((account_id, occurrence, description, amount_cents, _)) = schedule else { return Err("Scheduled transaction no longer exists.".into()); };
+    let Some((account_id, occurrence, end_date, description, amount_cents, _)) = schedule else { return Err("Scheduled transaction no longer exists.".into()); };
+    if end_date.as_ref().is_some_and(|end| occurrence > *end) { return Err("This schedule has already ended.".into()); }
     let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
     if record {
         transaction.execute(
