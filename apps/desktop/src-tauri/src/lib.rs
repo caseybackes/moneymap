@@ -67,6 +67,10 @@ struct RecurringSuggestion { account_id: String, account_name: String, descripti
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct PlaidConnectionInfo { id: String, institution_name: String, environment: String, account_count: i64 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SandboxLinkSession {
     link_token: String,
     session_id: String,
@@ -523,6 +527,14 @@ fn broker_post(path: &str, body: Value, connection_secret: Option<&str>) -> Resu
     response.json().map_err(|error| format!("Sandbox broker response was invalid: {error}"))
 }
 
+fn broker_post_empty(path: &str, connection_secret: &str) -> Result<(), String> {
+    let response = reqwest::blocking::Client::new().post(format!("{SANDBOX_BROKER_BASE_URL}/{path}"))
+        .header("x-family-finance-connection-key", connection_secret)
+        .send().map_err(|error| format!("Could not reach the Family Finance broker: {error}"))?;
+    if !response.status().is_success() { return Err(format!("Sandbox broker request failed ({})", response.status())); }
+    Ok(())
+}
+
 fn cents(value: &Value) -> Option<i64> {
     value.as_f64().map(|amount| (amount * 100.0).round() as i64)
 }
@@ -654,6 +666,31 @@ async fn sync_plaid_sandbox_connections(app: AppHandle) -> Result<usize, String>
 }
 
 #[tauri::command]
+fn plaid_connections_data(app: AppHandle) -> Result<Vec<PlaidConnectionInfo>, String> {
+    let (connection, _) = open_database(&app)?;
+    let mut statement = connection.prepare("SELECT p.id, p.institution_name, p.environment, COUNT(l.account_id) FROM plaid_connections p LEFT JOIN plaid_account_links l ON l.plaid_connection_id = p.id GROUP BY p.id, p.institution_name, p.environment ORDER BY p.created_at DESC")
+        .map_err(|error| error.to_string())?;
+    let entries = statement.query_map([], |row| Ok(PlaidConnectionInfo { id: row.get(0)?, institution_name: row.get(1)?, environment: row.get(2)?, account_count: row.get(3)? }))
+        .map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok(entries)
+}
+
+#[tauri::command]
+async fn disconnect_plaid_sandbox_connection(app: AppHandle, connection_id: String) -> Result<(), String> {
+    let local = {
+        let (connection, _) = open_database(&app)?;
+        connection.query_row("SELECT broker_connection_id, connection_secret FROM plaid_connections WHERE id = ?1 AND environment = 'sandbox'", [&connection_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .optional().map_err(|error| error.to_string())?
+    }.ok_or("Connected account is no longer available.")?;
+    let (broker_id, secret) = local;
+    tauri::async_runtime::spawn_blocking(move || broker_post_empty(&format!("connections/{broker_id}/disconnect"), &secret))
+        .await.map_err(|error| error.to_string())??;
+    let (connection, _) = open_database(&app)?;
+    connection.execute("DELETE FROM plaid_connections WHERE id = ?1", [&connection_id]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
     let payload: Value = reqwest::blocking::get(SANDBOX_BROKER_URL).map_err(|error| error.to_string())?
         .error_for_status().map_err(|error| error.to_string())?.json().map_err(|error| error.to_string())?;
@@ -682,7 +719,7 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections, plaid_connections_data, disconnect_plaid_sandbox_connection])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }
