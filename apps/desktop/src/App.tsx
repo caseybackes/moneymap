@@ -23,12 +23,14 @@ export function App() {
   const [ledger, setLedger] = useState<LedgerData | null>(null);
   const [calendarMonth, setCalendarMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [importing, setImporting] = useState(false);
 
   const refresh = useCallback(() => { void invoke<DashboardData>("dashboard_data").then(setDashboard).catch((reason: unknown) => setError(String(reason))); }, []);
   useEffect(refresh, [refresh]);
   useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); if (view === "scheduled") void invoke<Schedule[]>("scheduled_data").then(setSchedules).catch((reason: unknown) => setError(String(reason))); }, [view]);
 
   const netWorth = useMemo(() => dashboard?.accounts.reduce((total, account) => total + account.balanceCents, 0) ?? 0, [dashboard]);
+  async function importSandbox() { setImporting(true); setError(null); try { await invoke("import_plaid_sandbox"); refresh(); } catch (reason) { setError(String(reason)); } finally { setImporting(false); } }
 
   return <main className="app-shell">
     <aside className="rail" aria-label="Primary navigation">
@@ -57,7 +59,7 @@ export function App() {
         <Widget title="Accounts & cards" className="accounts-widget">
           <div className="account-grid">
             {dashboard.accounts.map((account) => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong></article>)}
-            <button className="connect-card" onClick={() => setDialog("account")}><span>+</span><strong>Connect another account</strong><small>Add locally now · Plaid Link next</small></button>
+            <button className="connect-card" onClick={importSandbox} disabled={importing}><span>+</span><strong>{importing ? "Importing Sandbox…" : "Import Plaid Sandbox"}</strong><small>Developer fixture · no Trial slot</small></button>
           </div>
         </Widget>
         <Widget title="Recent transactions" className="recent-widget">

@@ -1,13 +1,15 @@
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use keyring::Entry;
 use rand::RngCore;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::fs;
 use tauri::{AppHandle, Manager};
 
 const KEYRING_SERVICE: &str = "com.caseybackes.family-finance";
 const KEYRING_ACCOUNT: &str = "database-key-v2";
+const SANDBOX_BROKER_URL: &str = "https://family-finance-broker.cloud-admin-f91.workers.dev/v1/sandbox/demo-transactions";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -262,9 +264,36 @@ fn create_schedule(app: AppHandle, input: CreateScheduleInput) -> Result<String,
     Ok(id)
 }
 
+#[tauri::command]
+fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
+    let payload: Value = reqwest::blocking::get(SANDBOX_BROKER_URL).map_err(|error| error.to_string())?
+        .error_for_status().map_err(|error| error.to_string())?.json().map_err(|error| error.to_string())?;
+    let (connection, _) = open_database(&app)?;
+    let mut account_ids = std::collections::HashMap::new();
+    for account in payload["accounts"].as_array().ok_or("Sandbox response has no accounts.")? {
+        let provider_id = account["account_id"].as_str().ok_or("Sandbox account has no id.")?;
+        let name = account["name"].as_str().unwrap_or("Plaid Sandbox account");
+        let local_name = format!("First Platypus Bank · {name}");
+        let existing: Option<String> = connection.query_row("SELECT id FROM accounts WHERE name = ?1", [&local_name], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
+        let is_new = existing.is_none();
+        let id = existing.unwrap_or_else(new_id);
+        if is_new { connection.execute("INSERT INTO accounts(id, name, type, opening_balance_cents) VALUES(?1, ?2, ?3, 0)", (&id, &local_name, account["type"].as_str().unwrap_or("checking"))).map_err(|error| error.to_string())?; }
+        account_ids.insert(provider_id.to_owned(), id);
+    }
+    let mut imported = 0;
+    for item in payload["added"].as_array().ok_or("Sandbox response has no transactions.")? {
+        let external_id = item["transaction_id"].as_str().ok_or("Sandbox transaction has no id.")?;
+        let Some(account_id) = item["account_id"].as_str().and_then(|value| account_ids.get(value)) else { continue; };
+        let amount = item["amount"].as_f64().ok_or("Sandbox amount is invalid.")?;
+        let rows = connection.execute("INSERT OR IGNORE INTO transactions(id, account_id, transaction_date, description, amount_cents, source, external_transaction_id) VALUES(?1, ?2, ?3, ?4, ?5, 'plaid-sandbox', ?6)", (new_id(), account_id, item["date"].as_str().unwrap_or("1970-01-01"), item["name"].as_str().unwrap_or("Plaid transaction"), (-amount * 100.0).round() as i64, external_id)).map_err(|error| error.to_string())?;
+        imported += rows;
+    }
+    Ok(imported)
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, ledger_data, scheduled_data, create_schedule])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, ledger_data, scheduled_data, create_schedule, import_plaid_sandbox])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }
