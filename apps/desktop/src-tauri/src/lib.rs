@@ -38,6 +38,7 @@ struct DashboardTransaction {
     description: String,
     account_name: String,
     category_name: String,
+    category_id: Option<String>,
     amount_cents: i64,
 }
 
@@ -106,8 +107,13 @@ struct UpdateTransactionInput {
     transaction_date: String,
     description: String,
     amount_cents: i64,
+    category_id: Option<String>,
     notes: Option<String>,
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CategoryEntry { id: String, name: String }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,6 +175,11 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
            id TEXT PRIMARY KEY NOT NULL,
            name TEXT NOT NULL COLLATE NOCASE UNIQUE
          );
+         INSERT OR IGNORE INTO categories(id, name) VALUES
+           ('category-income', 'Income'), ('category-housing', 'Housing'), ('category-food', 'Food'),
+           ('category-transportation', 'Transportation'), ('category-utilities', 'Utilities'), ('category-health', 'Health'),
+           ('category-shopping', 'Shopping'), ('category-entertainment', 'Entertainment'), ('category-taxes', 'Taxes'),
+           ('category-savings', 'Savings'), ('category-debt', 'Debt'), ('category-transfer', 'Transfer');
          CREATE TABLE IF NOT EXISTS transactions (
            id TEXT PRIMARY KEY NOT NULL,
            account_id TEXT NOT NULL REFERENCES accounts(id),
@@ -261,12 +272,12 @@ fn dashboard_data(app: AppHandle) -> Result<DashboardData, String> {
         .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
 
     let mut transaction_statement = connection.prepare(
-        "SELECT t.id, t.account_id, t.transaction_date, t.description, a.name, COALESCE(c.name, 'Uncategorized'), t.amount_cents
+        "SELECT t.id, t.account_id, t.transaction_date, t.description, a.name, COALESCE(c.name, 'Uncategorized'), t.category_id, t.amount_cents
          FROM transactions t JOIN accounts a ON a.id = t.account_id LEFT JOIN categories c ON c.id = t.category_id
          ORDER BY t.transaction_date DESC, t.created_at DESC",
     ).map_err(|error| error.to_string())?;
     let recent_transactions = transaction_statement.query_map([], |row| Ok(DashboardTransaction {
-        id: row.get(0)?, account_id: row.get(1)?, transaction_date: row.get(2)?, description: row.get(3)?, account_name: row.get(4)?, category_name: row.get(5)?, amount_cents: row.get(6)?,
+        id: row.get(0)?, account_id: row.get(1)?, transaction_date: row.get(2)?, description: row.get(3)?, account_name: row.get(4)?, category_name: row.get(5)?, category_id: row.get(6)?, amount_cents: row.get(7)?,
     })).map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
 
@@ -322,8 +333,8 @@ fn update_transaction(app: AppHandle, input: UpdateTransactionInput) -> Result<(
     }
     let (connection, _) = open_database(&app)?;
     let updated = connection.execute(
-        "UPDATE transactions SET account_id = ?1, transaction_date = ?2, description = ?3, amount_cents = ?4, notes = ?5, updated_at = CURRENT_TIMESTAMP WHERE id = ?6",
-        (&input.account_id, &input.transaction_date, input.description.trim(), input.amount_cents, input.notes, &input.id),
+        "UPDATE transactions SET account_id = ?1, transaction_date = ?2, description = ?3, amount_cents = ?4, category_id = ?5, notes = ?6, updated_at = CURRENT_TIMESTAMP WHERE id = ?7",
+        (&input.account_id, &input.transaction_date, input.description.trim(), input.amount_cents, input.category_id, input.notes, &input.id),
     ).map_err(|error| error.to_string())?;
     if updated != 1 { return Err("Transaction no longer exists.".into()); }
     Ok(())
@@ -362,15 +373,36 @@ fn adjust_account_balance(app: AppHandle, input: AdjustAccountBalanceInput) -> R
 fn ledger_data(app: AppHandle) -> Result<LedgerData, String> {
     let (connection, _) = open_database(&app)?;
     let mut statement = connection.prepare(
-        "SELECT t.id, t.account_id, t.transaction_date, t.description, a.name, COALESCE(c.name, 'Uncategorized'), t.amount_cents
+        "SELECT t.id, t.account_id, t.transaction_date, t.description, a.name, COALESCE(c.name, 'Uncategorized'), t.category_id, t.amount_cents
          FROM transactions t JOIN accounts a ON a.id = t.account_id LEFT JOIN categories c ON c.id = t.category_id
          ORDER BY t.transaction_date DESC, t.created_at DESC",
     ).map_err(|error| error.to_string())?;
     let transactions = statement.query_map([], |row| Ok(DashboardTransaction {
-        id: row.get(0)?, account_id: row.get(1)?, transaction_date: row.get(2)?, description: row.get(3)?, account_name: row.get(4)?, category_name: row.get(5)?, amount_cents: row.get(6)?,
+        id: row.get(0)?, account_id: row.get(1)?, transaction_date: row.get(2)?, description: row.get(3)?, account_name: row.get(4)?, category_name: row.get(5)?, category_id: row.get(6)?, amount_cents: row.get(7)?,
     })).map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
     Ok(LedgerData { transactions })
+}
+
+#[tauri::command]
+fn categories_data(app: AppHandle) -> Result<Vec<CategoryEntry>, String> {
+    let (connection, _) = open_database(&app)?;
+    let mut statement = connection.prepare("SELECT id, name FROM categories ORDER BY name COLLATE NOCASE").map_err(|error| error.to_string())?;
+    let entries = statement.query_map([], |row| Ok(CategoryEntry { id: row.get(0)?, name: row.get(1)? }))
+        .map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok(entries)
+}
+
+#[tauri::command]
+fn create_category(app: AppHandle, name: String) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() { return Err("A category name is required.".into()); }
+    let (connection, _) = open_database(&app)?;
+    let id = new_id();
+    connection.execute("INSERT INTO categories(id, name) VALUES(?1, ?2)", (&id, name)).map_err(|error| {
+        if error.to_string().contains("UNIQUE") { "That category already exists.".into() } else { error.to_string() }
+    })?;
+    Ok(id)
 }
 
 #[tauri::command]
@@ -598,7 +630,7 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }

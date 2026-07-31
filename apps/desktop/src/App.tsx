@@ -3,12 +3,13 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { usePlaidLink } from "react-plaid-link";
 
 type Account = { id: string; name: string; accountType: string; balanceCents: number };
-type LedgerEntry = { id: string; accountId: string; transactionDate: string; description: string; accountName: string; categoryName: string; amountCents: number };
+type LedgerEntry = { id: string; accountId: string; transactionDate: string; description: string; accountName: string; categoryName: string; categoryId: string | null; amountCents: number };
 type DashboardData = { incomeCents: number; spendingCents: number; accounts: Account[]; recentTransactions: LedgerEntry[] };
 type LedgerData = { transactions: LedgerEntry[] };
 type Schedule = { id: string; accountId: string; startDate: string; nextOccurrence: string; description: string; amountCents: number; recurrence: string; accountName: string };
 type SandboxLinkSession = { linkToken: string; sessionId: string; sessionSecret: string; expiration: string };
-type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts" | "scenarios";
+type Category = { id: string; name: string };
+type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts" | "scenarios" | "categories";
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const formatMoney = (cents: number) => money.format(cents / 100);
@@ -57,11 +58,13 @@ export function App() {
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
   const [editingTransaction, setEditingTransaction] = useState<LedgerEntry | null>(null);
   const [adjustingAccount, setAdjustingAccount] = useState<Account | null>(null);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [importing, setImporting] = useState(false);
   const [rangeMonths, setRangeMonths] = useState<number | null>(1);
 
   const refresh = useCallback(() => { void invoke<DashboardData>("dashboard_data").then(setDashboard).catch((reason: unknown) => setError(String(reason))); }, []);
   useEffect(refresh, [refresh]);
+  useEffect(() => { void invoke<Category[]>("categories_data").then(setCategories).catch((reason: unknown) => setError(String(reason))); }, []);
   useEffect(() => { if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger).catch((reason: unknown) => setError(String(reason))); if (view === "scheduled") void invoke<Schedule[]>("scheduled_data").then(setSchedules).catch((reason: unknown) => setError(String(reason))); }, [view]);
 
   const netWorth = useMemo(() => dashboard?.accounts.reduce((total, account) => total + account.balanceCents, 0) ?? 0, [dashboard]);
@@ -79,9 +82,10 @@ export function App() {
       <button className={`nav-button ${view === "accounts" ? "selected" : ""}`} onClick={() => setView("accounts")} aria-label="Accounts">◎</button>
       <button className={`nav-button ${view === "scheduled" ? "selected" : ""}`} onClick={() => setView("scheduled")} aria-label="Scheduled transactions">⌁</button>
       <button className={`nav-button ${view === "scenarios" ? "selected" : ""}`} onClick={() => setView("scenarios")} aria-label="Scenario modeling">AI</button>
+      <button className={`nav-button ${view === "categories" ? "selected" : ""}`} onClick={() => setView("categories")} aria-label="Categories">#</button>
     </aside>
     <section className="page">
-      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" || view === "scenarios" ? "PLANNING" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : view === "scenarios" ? "Scenario modeling" : "Ledger"}</h1></div>{view !== "scenarios" ? <button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : view === "accounts" ? "account" : "transaction")}>{view === "scheduled" ? "Add schedule" : view === "accounts" ? "Add account" : "Add transaction"}</button> : null}</header>
+      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" || view === "scenarios" ? "PLANNING" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : view === "categories" ? "Categories" : view === "scenarios" ? "Scenario modeling" : "Ledger"}</h1></div>{view !== "scenarios" && view !== "categories" ? <button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : view === "accounts" ? "account" : "transaction")}>{view === "scheduled" ? "Add schedule" : view === "accounts" ? "Add account" : "Add transaction"}</button> : null}</header>
       {error ? <p className="status error">Local data store unavailable: {error}</p> : null}
       {!dashboard && !error ? <p className="status">Opening encrypted local data store...</p> : null}
       {dashboard && view === "dashboard" ? <div className="dashboard-grid">
@@ -110,8 +114,9 @@ export function App() {
       {view === "scheduled" ? <Scheduled schedules={schedules} onEdit={(schedule) => { setEditingSchedule(schedule); setDialog("schedule"); }} onChanged={() => { refresh(); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
       {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} onAdd={() => setDialog("account")} onAdjust={(account) => { setAdjustingAccount(account); setDialog("adjustment"); }} /> : null}
       {view === "scenarios" ? <ScenarioModel netWorth={netWorth} incomeCents={dashboard?.incomeCents ?? 0} spendingCents={dashboard?.spendingCents ?? 0} /> : null}
+      {view === "categories" ? <CategoryManager categories={categories} onCreated={() => void invoke<Category[]>("categories_data").then(setCategories)} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
-      {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} entry={editingTransaction} onClose={() => { setDialog(null); setEditingTransaction(null); }} onSaved={() => { setDialog(null); setEditingTransaction(null); refresh(); if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
+      {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} categories={categories} entry={editingTransaction} onClose={() => { setDialog(null); setEditingTransaction(null); }} onSaved={() => { setDialog(null); setEditingTransaction(null); refresh(); if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {dialog === "schedule" ? <ScheduleDialog accounts={dashboard?.accounts ?? []} schedule={editingSchedule} onClose={() => { setDialog(null); setEditingSchedule(null); }} onSaved={() => { setDialog(null); setEditingSchedule(null); setView("scheduled"); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
       {dialog === "adjustment" && adjustingAccount ? <BalanceAdjustmentDialog account={adjustingAccount} onClose={() => { setDialog(null); setAdjustingAccount(null); }} onSaved={() => { setDialog(null); setAdjustingAccount(null); refresh(); if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
     </section>
@@ -149,6 +154,12 @@ function Scheduled({ schedules, onEdit, onChanged }: { schedules: Schedule[]; on
 }
 
 function Accounts({ accounts, onAdd, onAdjust }: { accounts: Account[]; onAdd: () => void; onAdjust: (account: Account) => void }) { return <section className="ledger-widget accounts-page"><div className="account-grid">{accounts.map(account => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong><button className="account-adjust" onClick={() => onAdjust(account)}>Update balance</button></article>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Manual account or balance tracking</small></button><SandboxLinkButton onImported={() => window.location.reload()} /></div></section>; }
+
+function CategoryManager({ categories, onCreated }: { categories: Category[]; onCreated: () => void }) {
+  const [name, setName] = useState(""); const [error, setError] = useState<string | null>(null);
+  async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); try { await invoke("create_category", { name }); setName(""); setError(null); onCreated(); } catch (reason) { setError(String(reason)); } }
+  return <div className="category-layout"><Widget title="Preferred categories" className="category-list"><p className="empty-copy">Used for manual entries and future category suggestions.</p><div>{categories.map(category => <span key={category.id}>{category.name}</span>)}</div></Widget><Widget title="Add category" className="category-add"><form onSubmit={add}><label>Name<input value={name} onChange={event => setName(event.target.value)} required placeholder="Pet care" /></label><button className="primary-action" type="submit">Add category</button>{error ? <p className="form-error">{error}</p> : null}</form></Widget></div>;
+}
 
 function SandboxLinkButton({ onImported }: { onImported: () => void }) {
   const [session, setSession] = useState<SandboxLinkSession | null>(null);
@@ -223,15 +234,15 @@ function BalanceAdjustmentDialog({ account, onClose, onSaved }: { account: Accou
   return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>Update balance</h2><button type="button" onClick={onClose}>×</button></header><p className="empty-copy">{account.name} currently shows {formatMoney(account.balanceCents)}. Saving creates an adjustment record.</p><label>Actual balance<input name="balance" type="number" step="0.01" required defaultValue={(account.balanceCents / 100).toFixed(2)} autoFocus /></label><label>Date<input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label><label>Notes<textarea name="notes" rows={2} placeholder="Optional reason for this adjustment" /></label>{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button><button className="primary-action" type="submit">Save adjustment</button></footer></form></div>;
 }
 
-function TransactionDialog({ accounts, entry, onClose, onSaved }: { accounts: Account[]; entry: LedgerEntry | null; onClose: () => void; onSaved: () => void }) {
+function TransactionDialog({ accounts, categories, entry, onClose, onSaved }: { accounts: Account[]; categories: Category[]; entry: LedgerEntry | null; onClose: () => void; onSaved: () => void }) {
   const [error, setError] = useState<string | null>(null);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget);
-    const input = { accountId: form.get("accountId"), transactionDate: form.get("date"), description: form.get("description"), amountCents: Math.round(Number(form.get("amount")) * 100), notes: form.get("notes") || null };
+    const input = { accountId: form.get("accountId"), transactionDate: form.get("date"), description: form.get("description"), amountCents: Math.round(Number(form.get("amount")) * 100), categoryId: form.get("categoryId") || null, notes: form.get("notes") || null };
     try { if (entry) await invoke("update_transaction", { input: { id: entry.id, ...input } }); else await invoke("create_transaction", { input }); onSaved(); }
     catch (reason) { setError(String(reason)); }
   }
-  return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>{entry ? "Edit transaction" : "Add transaction"}</h2><button type="button" onClick={onClose}>×</button></header>{accounts.length === 0 ? <p className="empty-copy">Create an account first.</p> : <><label>Account<select name="accountId" required defaultValue={entry?.accountId}>{accounts.map(account => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label><label>Date<input name="date" type="date" defaultValue={entry?.transactionDate ?? new Date().toISOString().slice(0, 10)} required /></label><label>Description<input name="description" required placeholder="Groceries" defaultValue={entry?.description} /></label><label>Amount<input name="amount" type="number" step="0.01" required placeholder="-48.20" defaultValue={entry ? (entry.amountCents / 100).toFixed(2) : undefined} /></label><label>Notes<textarea name="notes" rows={3} /></label></>}{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button>{accounts.length > 0 ? <button className="primary-action" type="submit">{entry ? "Save changes" : "Save transaction"}</button> : null}</footer></form></div>;
+  return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>{entry ? "Edit transaction" : "Add transaction"}</h2><button type="button" onClick={onClose}>×</button></header>{accounts.length === 0 ? <p className="empty-copy">Create an account first.</p> : <><label>Account<select name="accountId" required defaultValue={entry?.accountId}>{accounts.map(account => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label><label>Date<input name="date" type="date" defaultValue={entry?.transactionDate ?? new Date().toISOString().slice(0, 10)} required /></label><label>Description<input name="description" required placeholder="Groceries" defaultValue={entry?.description} /></label><label>Amount<input name="amount" type="number" step="0.01" required placeholder="-48.20" defaultValue={entry ? (entry.amountCents / 100).toFixed(2) : undefined} /></label><label>Category<select name="categoryId" defaultValue={entry?.categoryId ?? ""}><option value="">Uncategorized</option>{categories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label>Notes<textarea name="notes" rows={3} /></label></>}{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button>{accounts.length > 0 ? <button className="primary-action" type="submit">{entry ? "Save changes" : "Save transaction"}</button> : null}</footer></form></div>;
 }
 
 function ScheduleDialog({ accounts, schedule, onClose, onSaved }: { accounts: Account[]; schedule: Schedule | null; onClose: () => void; onSaved: () => void }) {
