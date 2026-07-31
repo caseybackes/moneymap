@@ -51,6 +51,10 @@ struct LedgerData {
     transactions: Vec<DashboardTransaction>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScheduledEntry { id: String, start_date: String, description: String, amount_cents: i64, recurrence: String, account_name: String }
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateAccountInput {
@@ -69,6 +73,10 @@ struct CreateTransactionInput {
     category_id: Option<String>,
     notes: Option<String>,
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateScheduleInput { account_id: String, start_date: String, description: String, amount_cents: i64, recurrence: String }
 
 fn new_id() -> String {
     let mut bytes = [0_u8; 16];
@@ -126,6 +134,12 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
            UNIQUE(source, external_transaction_id)
+         );
+         CREATE TABLE IF NOT EXISTS scheduled_transactions (
+           id TEXT PRIMARY KEY NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id), start_date TEXT NOT NULL,
+           description TEXT NOT NULL, amount_cents INTEGER NOT NULL,
+           recurrence TEXT NOT NULL CHECK(recurrence IN ('weekly', 'monthly')), active INTEGER NOT NULL DEFAULT 1,
+           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);"
     ).map_err(|error| error.to_string())?;
@@ -226,9 +240,31 @@ fn ledger_data(app: AppHandle) -> Result<LedgerData, String> {
     Ok(LedgerData { transactions })
 }
 
+#[tauri::command]
+fn scheduled_data(app: AppHandle) -> Result<Vec<ScheduledEntry>, String> {
+    let (connection, _) = open_database(&app)?;
+    let mut statement = connection.prepare("SELECT s.id, s.start_date, s.description, s.amount_cents, s.recurrence, a.name FROM scheduled_transactions s JOIN accounts a ON a.id = s.account_id WHERE s.active = 1 ORDER BY s.start_date, s.description")
+        .map_err(|error| error.to_string())?;
+    let rows = statement.query_map([], |row| Ok(ScheduledEntry { id: row.get(0)?, start_date: row.get(1)?, description: row.get(2)?, amount_cents: row.get(3)?, recurrence: row.get(4)?, account_name: row.get(5)? }))
+        .map_err(|error| error.to_string())?;
+    let entries = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok(entries)
+}
+
+#[tauri::command]
+fn create_schedule(app: AppHandle, input: CreateScheduleInput) -> Result<String, String> {
+    if input.description.trim().is_empty() { return Err("A scheduled transaction description is required.".into()); }
+    if !matches!(input.recurrence.as_str(), "weekly" | "monthly") { return Err("Choose weekly or monthly.".into()); }
+    let (connection, _) = open_database(&app)?;
+    let id = new_id();
+    connection.execute("INSERT INTO scheduled_transactions(id, account_id, start_date, description, amount_cents, recurrence) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", (&id, input.account_id, input.start_date, input.description.trim(), input.amount_cents, input.recurrence))
+        .map_err(|error| error.to_string())?;
+    Ok(id)
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, ledger_data])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, ledger_data, scheduled_data, create_schedule])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }
