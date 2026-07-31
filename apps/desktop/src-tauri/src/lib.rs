@@ -172,10 +172,14 @@ fn database_key() -> Result<String, String> {
     }
 }
 
-fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
+fn database_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let directory = app.path().app_local_data_dir().map_err(|error| error.to_string())?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let path = directory.join("family-finance-v2.db");
+    Ok(directory.join("family-finance-v2.db"))
+}
+
+fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
+    let path = database_path(app)?;
     let key = database_key()?;
     let connection = Connection::open(&path).map_err(|error| error.to_string())?;
     connection.pragma_update(None, "key", &key).map_err(|error| error.to_string())?;
@@ -312,6 +316,34 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
     connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)", [])
         .map_err(|error| error.to_string())?;
     Ok((connection, path.display().to_string()))
+}
+
+/// Archives an unreadable local database, clears its unusable key, and creates a
+/// fresh encrypted store. The archive is deliberately retained for support or
+/// forensic recovery; this command never deletes the prior file.
+#[tauri::command]
+fn reset_unavailable_database(app: AppHandle) -> Result<DatabaseStatus, String> {
+    let path = database_path(&app)?;
+    if path.exists() {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_secs();
+        let archive = path.with_file_name(format!("family-finance-v2.unreadable-{timestamp}.db"));
+        fs::rename(&path, &archive).map_err(|error| format!("Could not preserve the unreadable database: {error}"))?;
+    }
+
+    let entry = Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|error| error.to_string())?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => {}
+        Err(error) => return Err(error.to_string()),
+    }
+
+    let (connection, path) = open_database(&app)?;
+    let schema_version: u32 = connection
+        .query_row("SELECT max(version) FROM schema_migrations", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    Ok(DatabaseStatus { database_path: path, encrypted: true, schema_version })
 }
 
 #[tauri::command]
@@ -865,7 +897,7 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections, plaid_connections_data, disconnect_plaid_sandbox_connection])
+        .invoke_handler(tauri::generate_handler![database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections, plaid_connections_data, disconnect_plaid_sandbox_connection])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }

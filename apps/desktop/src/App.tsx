@@ -53,6 +53,7 @@ function ScenarioModel({ netWorth, incomeCents, spendingCents }: { netWorth: num
 export function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [recoveringStore, setRecoveringStore] = useState(false);
   const [dialog, setDialog] = useState<"account" | "transaction" | "schedule" | "adjustment" | null>(null);
   const [view, setView] = useState<View>("dashboard");
   const [ledger, setLedger] = useState<LedgerData | null>(null);
@@ -82,6 +83,16 @@ export function App() {
   async function addSuggestedSchedule(item: RecurringSuggestion) { await invoke("create_schedule", { input: { accountId: item.accountId, startDate: item.nextOccurrence, description: item.description, amountCents: item.amountCents, recurrence: item.recurrence } }); setSuggestions(current => current.filter(candidate => !(candidate.accountId === item.accountId && candidate.description === item.description && candidate.amountCents === item.amountCents))); }
   async function syncConnectedAccounts() { setSyncingAccounts(true); setError(null); setSyncMessage(null); try { const changed = await invoke<number>("sync_plaid_sandbox_connections"); setSyncMessage(changed === 0 ? "Up to date." : `Synced ${changed} transaction change${changed === 1 ? "" : "s"}.`); refresh(); if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
   async function disconnectConnectedAccount(connection: ConnectedInstitution) { if (!confirm(`Disconnect ${connection.institutionName}? Local history will be kept, but future sync will stop.`)) return; setSyncingAccounts(true); try { await invoke("disconnect_plaid_sandbox_connection", { connectionId: connection.id }); setConnections(current => current.filter(item => item.id !== connection.id)); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
+  async function recoverLocalStore() {
+    if (!confirm("Start a fresh encrypted local store? The unreadable file will be preserved in the app data folder, but it cannot be used without its original encryption key.")) return;
+    setRecoveringStore(true);
+    try {
+      await invoke("reset_unavailable_database");
+      setError(null);
+      refresh();
+      void invoke<Category[]>("categories_data").then(setCategories);
+    } catch (reason) { setError(String(reason)); } finally { setRecoveringStore(false); }
+  }
 
   return <main className="app-shell">
     <aside className="rail" aria-label="Primary navigation">
@@ -96,7 +107,7 @@ export function App() {
     </aside>
     <section className="page">
       <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" || view === "scenarios" ? "PLANNING" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : view === "categories" ? "Categories" : view === "scenarios" ? "Scenario modeling" : "Ledger"}</h1></div>{view !== "scenarios" && view !== "categories" ? <button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : view === "accounts" ? "account" : "transaction")}>{view === "scheduled" ? "Add schedule" : view === "accounts" ? "Add account" : "Add transaction"}</button> : null}</header>
-      {error ? <p className="status error">Local data store unavailable: {error}</p> : null}
+      {error ? <div className="status error"><strong>Local data store unavailable.</strong><span>{error}</span><p>This file was encrypted with a key that is no longer available on this Windows profile. Starting fresh preserves the unreadable file as an archive and creates a new encrypted store.</p><button disabled={recoveringStore} onClick={() => void recoverLocalStore()}>{recoveringStore ? "Preparing fresh store…" : "Preserve file and start fresh"}</button></div> : null}
       {!dashboard && !error ? <p className="status">Opening encrypted local data store...</p> : null}
       {dashboard && view === "dashboard" ? <div className="dashboard-grid">
         <Widget title="Net worth" className="net-worth-widget">

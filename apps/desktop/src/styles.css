@@ -34,3 +34,5 @@
 .upcoming-row small{display:block;margin-top:4px;color:#8fa1b6;font-size:11px}
 .suggestions-widget{grid-column:auto;min-height:184px}
 @media(max-width:1050px){.dashboard-grid{grid-template-columns:1fr}.accounts-widget,.suggestions-widget{grid-column:auto}.account-grid{grid-template-columns:repeat(auto-fit,minmax(185px,1fr))}}
+/* Recovery surface for an intentionally preserved but unreadable encrypted store. */
+.status.error strong,.status.error span,.status.error p{display:block}.status.error span{margin-top:6px}.status.error p{max-width:720px;color:#d7b6b6;font-size:13px;line-height:1.45;margin:12px 0}.status.error button{background:#3b2830;border:1px solid #b85252;border-radius:7px;color:#ffe1df;padding:9px 12px;cursor:pointer}.status.error button:disabled{opacity:.6;cursor:wait}
