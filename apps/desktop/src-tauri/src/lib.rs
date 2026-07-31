@@ -111,6 +111,15 @@ struct UpdateTransactionInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct AdjustAccountBalanceInput {
+    account_id: String,
+    target_balance_cents: i64,
+    transaction_date: String,
+    notes: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CreateScheduleInput { account_id: String, start_date: String, description: String, amount_cents: i64, recurrence: String }
 
 #[derive(Deserialize)]
@@ -318,6 +327,35 @@ fn update_transaction(app: AppHandle, input: UpdateTransactionInput) -> Result<(
     ).map_err(|error| error.to_string())?;
     if updated != 1 { return Err("Transaction no longer exists.".into()); }
     Ok(())
+}
+
+#[tauri::command]
+fn adjust_account_balance(app: AppHandle, input: AdjustAccountBalanceInput) -> Result<i64, String> {
+    if !input.transaction_date.chars().all(|character| character.is_ascii_digit() || character == '-') || input.transaction_date.len() != 10 {
+        return Err("Adjustment date must use YYYY-MM-DD.".into());
+    }
+    let (connection, _) = open_database(&app)?;
+    let account: Option<(String, Option<i64>, i64)> = connection.query_row(
+        "SELECT a.name, a.reported_balance_cents, a.opening_balance_cents + COALESCE((SELECT SUM(t.amount_cents) FROM transactions t WHERE t.account_id = a.id), 0) FROM accounts a WHERE a.id = ?1",
+        [&input.account_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    let Some((account_name, reported_balance, calculated_balance)) = account else { return Err("Account no longer exists.".into()); };
+    let current_balance = reported_balance.unwrap_or(calculated_balance);
+    let adjustment = input.target_balance_cents - current_balance;
+    let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
+    if adjustment != 0 {
+        transaction.execute(
+            "INSERT INTO transactions(id, account_id, transaction_date, description, amount_cents, source, notes) VALUES(?1, ?2, ?3, ?4, ?5, 'adjustment', ?6)",
+            (new_id(), &input.account_id, &input.transaction_date, format!("Balance adjustment · {account_name}"), adjustment, input.notes),
+        ).map_err(|error| error.to_string())?;
+    }
+    if reported_balance.is_some() {
+        transaction.execute("UPDATE accounts SET reported_balance_cents = ?1 WHERE id = ?2", (input.target_balance_cents, &input.account_id))
+            .map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(adjustment)
 }
 
 #[tauri::command]
@@ -560,7 +598,7 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }

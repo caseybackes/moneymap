@@ -35,13 +35,14 @@ function NetWorthChart({ netWorth, transactions }: { netWorth: number; transacti
 export function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"account" | "transaction" | "schedule" | null>(null);
+  const [dialog, setDialog] = useState<"account" | "transaction" | "schedule" | "adjustment" | null>(null);
   const [view, setView] = useState<View>("dashboard");
   const [ledger, setLedger] = useState<LedgerData | null>(null);
   const [calendarMonth, setCalendarMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
   const [editingTransaction, setEditingTransaction] = useState<LedgerEntry | null>(null);
+  const [adjustingAccount, setAdjustingAccount] = useState<Account | null>(null);
   const [importing, setImporting] = useState(false);
   const [rangeMonths, setRangeMonths] = useState<number | null>(1);
 
@@ -93,10 +94,11 @@ export function App() {
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onEdit={(entry) => { setEditingTransaction(entry); setDialog("transaction"); }} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} onMonthChange={setCalendarMonth} /> : null}
       {view === "scheduled" ? <Scheduled schedules={schedules} onEdit={(schedule) => { setEditingSchedule(schedule); setDialog("schedule"); }} onChanged={() => { refresh(); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
-      {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} onAdd={() => setDialog("account")} /> : null}
+      {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} onAdd={() => setDialog("account")} onAdjust={(account) => { setAdjustingAccount(account); setDialog("adjustment"); }} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
       {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} entry={editingTransaction} onClose={() => { setDialog(null); setEditingTransaction(null); }} onSaved={() => { setDialog(null); setEditingTransaction(null); refresh(); if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {dialog === "schedule" ? <ScheduleDialog accounts={dashboard?.accounts ?? []} schedule={editingSchedule} onClose={() => { setDialog(null); setEditingSchedule(null); }} onSaved={() => { setDialog(null); setEditingSchedule(null); setView("scheduled"); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
+      {dialog === "adjustment" && adjustingAccount ? <BalanceAdjustmentDialog account={adjustingAccount} onClose={() => { setDialog(null); setAdjustingAccount(null); }} onSaved={() => { setDialog(null); setAdjustingAccount(null); refresh(); if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
     </section>
   </main>;
 }
@@ -131,7 +133,7 @@ function Scheduled({ schedules, onEdit, onChanged }: { schedules: Schedule[]; on
   return <section className="ledger-widget scheduled-widget"><div className="ledger-head"><span>Next occurrence</span><span>Description</span><span>Account</span><span>Amount & actions</span></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.nextOccurrence}<small>{item.recurrence} · starts {item.startDate}</small></span><strong>{item.description}</strong><span>{item.accountName}</span><span className="schedule-actions"><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong><div><button onClick={() => onEdit(item)}>Edit</button><button disabled={processing !== null} onClick={() => void process(item, "skip")}>{processing === `skip:${item.id}` ? "Skipping…" : "Skip"}</button><button className="primary-action" disabled={processing !== null} onClick={() => void process(item, "record")}>{processing === `record:${item.id}` ? "Recording…" : "Record"}</button></div>{status[item.id] ? <small className="schedule-status">{status[item.id]}</small> : null}</span></div>)}</section>;
 }
 
-function Accounts({ accounts, onAdd }: { accounts: Account[]; onAdd: () => void }) { return <section className="ledger-widget accounts-page"><div className="account-grid">{accounts.map(account => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong></article>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Manual account or balance tracking</small></button><SandboxLinkButton onImported={() => window.location.reload()} /></div></section>; }
+function Accounts({ accounts, onAdd, onAdjust }: { accounts: Account[]; onAdd: () => void; onAdjust: (account: Account) => void }) { return <section className="ledger-widget accounts-page"><div className="account-grid">{accounts.map(account => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong><button className="account-adjust" onClick={() => onAdjust(account)}>Update balance</button></article>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Manual account or balance tracking</small></button><SandboxLinkButton onImported={() => window.location.reload()} /></div></section>; }
 
 function SandboxLinkButton({ onImported }: { onImported: () => void }) {
   const [session, setSession] = useState<SandboxLinkSession | null>(null);
@@ -194,6 +196,16 @@ function AccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
     catch (reason) { setError(String(reason)); }
   }
   return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>Add account</h2><button type="button" onClick={onClose}>×</button></header><label>Name<input name="name" required autoFocus placeholder="Everyday checking" /></label><label>Type<select name="type" defaultValue="checking"><option value="checking">Checking</option><option value="savings">Savings</option><option value="credit-card">Credit card</option><option value="investment">Investment</option><option value="loan">Loan</option></select></label><label>Opening balance<input name="balance" type="number" step="0.01" defaultValue="0" required /></label>{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button><button className="primary-action" type="submit">Save account</button></footer></form></div>;
+}
+
+function BalanceAdjustmentDialog({ account, onClose, onSaved }: { account: Account; onClose: () => void; onSaved: () => void }) {
+  const [error, setError] = useState<string | null>(null);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); const form = new FormData(event.currentTarget);
+    try { await invoke("adjust_account_balance", { input: { accountId: account.id, targetBalanceCents: Math.round(Number(form.get("balance")) * 100), transactionDate: form.get("date"), notes: form.get("notes") || null } }); onSaved(); }
+    catch (reason) { setError(String(reason)); }
+  }
+  return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>Update balance</h2><button type="button" onClick={onClose}>×</button></header><p className="empty-copy">{account.name} currently shows {formatMoney(account.balanceCents)}. Saving creates an adjustment record.</p><label>Actual balance<input name="balance" type="number" step="0.01" required defaultValue={(account.balanceCents / 100).toFixed(2)} autoFocus /></label><label>Date<input name="date" type="date" defaultValue={new Date().toISOString().slice(0, 10)} required /></label><label>Notes<textarea name="notes" rows={2} placeholder="Optional reason for this adjustment" /></label>{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button><button className="primary-action" type="submit">Save adjustment</button></footer></form></div>;
 }
 
 function TransactionDialog({ accounts, entry, onClose, onSaved }: { accounts: Account[]; entry: LedgerEntry | null; onClose: () => void; onSaved: () => void }) {
