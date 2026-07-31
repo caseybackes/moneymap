@@ -62,6 +62,7 @@ export function App() {
   const [adjustingAccount, setAdjustingAccount] = useState<Account | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [suggestions, setSuggestions] = useState<RecurringSuggestion[]>([]);
+  const [syncingAccounts, setSyncingAccounts] = useState(false);
   const [importing, setImporting] = useState(false);
   const [rangeMonths, setRangeMonths] = useState<number | null>(1);
 
@@ -77,6 +78,7 @@ export function App() {
   const periodSpending = -periodTransactions.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0);
   async function importSandbox() { setImporting(true); setError(null); try { await invoke("import_plaid_sandbox"); refresh(); } catch (reason) { setError(String(reason)); } finally { setImporting(false); } }
   async function addSuggestedSchedule(item: RecurringSuggestion) { await invoke("create_schedule", { input: { accountId: item.accountId, startDate: item.nextOccurrence, description: item.description, amountCents: item.amountCents, recurrence: item.recurrence } }); setSuggestions(current => current.filter(candidate => !(candidate.accountId === item.accountId && candidate.description === item.description && candidate.amountCents === item.amountCents))); }
+  async function syncConnectedAccounts() { setSyncingAccounts(true); setError(null); try { await invoke("sync_plaid_sandbox_connections"); refresh(); if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
 
   return <main className="app-shell">
     <aside className="rail" aria-label="Primary navigation">
@@ -120,7 +122,7 @@ export function App() {
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onEdit={(entry) => { setEditingTransaction(entry); setDialog("transaction"); }} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} schedules={schedules} onMonthChange={setCalendarMonth} /> : null}
       {view === "scheduled" ? <Scheduled schedules={schedules} onEdit={(schedule) => { setEditingSchedule(schedule); setDialog("schedule"); }} onChanged={() => { refresh(); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
-      {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} onAdd={() => setDialog("account")} onAdjust={(account) => { setAdjustingAccount(account); setDialog("adjustment"); }} /> : null}
+      {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} onAdd={() => setDialog("account")} onAdjust={(account) => { setAdjustingAccount(account); setDialog("adjustment"); }} onSync={() => void syncConnectedAccounts()} syncing={syncingAccounts} /> : null}
       {view === "scenarios" ? <ScenarioModel netWorth={netWorth} incomeCents={dashboard?.incomeCents ?? 0} spendingCents={dashboard?.spendingCents ?? 0} /> : null}
       {view === "categories" ? <CategoryManager categories={categories} onCreated={() => void invoke<Category[]>("categories_data").then(setCategories)} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
@@ -161,7 +163,7 @@ function Scheduled({ schedules, onEdit, onChanged }: { schedules: Schedule[]; on
   return <section className="ledger-widget scheduled-widget"><div className="ledger-head"><span>Next occurrence</span><span>Description</span><span>Account</span><span>Amount & actions</span></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.nextOccurrence}<small>{item.recurrence} · starts {item.startDate}</small></span><strong>{item.description}</strong><span>{item.accountName}</span><span className="schedule-actions"><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong><div><button onClick={() => onEdit(item)}>Edit</button><button disabled={processing !== null} onClick={() => void process(item, "skip")}>{processing === `skip:${item.id}` ? "Skipping…" : "Skip"}</button><button className="primary-action" disabled={processing !== null} onClick={() => void process(item, "record")}>{processing === `record:${item.id}` ? "Recording…" : "Record"}</button></div>{status[item.id] ? <small className="schedule-status">{status[item.id]}</small> : null}</span></div>)}</section>;
 }
 
-function Accounts({ accounts, onAdd, onAdjust }: { accounts: Account[]; onAdd: () => void; onAdjust: (account: Account) => void }) { return <section className="ledger-widget accounts-page"><div className="account-grid">{accounts.map(account => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong><button className="account-adjust" onClick={() => onAdjust(account)}>Update balance</button></article>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Manual account or balance tracking</small></button><SandboxLinkButton onImported={() => window.location.reload()} /></div></section>; }
+function Accounts({ accounts, onAdd, onAdjust, onSync, syncing }: { accounts: Account[]; onAdd: () => void; onAdjust: (account: Account) => void; onSync: () => void; syncing: boolean }) { return <section className="ledger-widget accounts-page"><div className="accounts-toolbar"><p className="empty-copy">Connected Sandbox accounts can be refreshed without going through Link again.</p><button className="primary-action" disabled={syncing} onClick={onSync}>{syncing ? "Syncing accounts…" : "Sync connected accounts"}</button></div><div className="account-grid">{accounts.map(account => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong><button className="account-adjust" onClick={() => onAdjust(account)}>Update balance</button></article>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Manual account or balance tracking</small></button><SandboxLinkButton onImported={() => window.location.reload()} /></div></section>; }
 
 function CategoryManager({ categories, onCreated }: { categories: Category[]; onCreated: () => void }) {
   const [name, setName] = useState(""); const [error, setError] = useState<string | null>(null);

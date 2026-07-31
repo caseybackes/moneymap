@@ -633,6 +633,27 @@ async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkI
 }
 
 #[tauri::command]
+async fn sync_plaid_sandbox_connections(app: AppHandle) -> Result<usize, String> {
+    let connections = {
+        let (connection, _) = open_database(&app)?;
+        let mut statement = connection.prepare("SELECT id, broker_connection_id, connection_secret FROM plaid_connections WHERE environment = 'sandbox'")
+            .map_err(|error| error.to_string())?;
+        let records = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+            .map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+        records
+    };
+    if connections.is_empty() { return Ok(0); }
+    let payloads = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<(String, Value)>, String> {
+        connections.into_iter().map(|(local_id, broker_id, secret)| {
+            broker_post(&format!("connections/{broker_id}/sync"), Value::Object(Default::default()), Some(&secret)).map(|payload| (local_id, payload))
+        }).collect()
+    }).await.map_err(|error| error.to_string())??;
+    let mut changed = 0;
+    for (local_id, payload) in payloads { changed += apply_plaid_sync(&app, &local_id, &payload)?; }
+    Ok(changed)
+}
+
+#[tauri::command]
 fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
     let payload: Value = reqwest::blocking::get(SANDBOX_BROKER_URL).map_err(|error| error.to_string())?
         .error_for_status().map_err(|error| error.to_string())?.json().map_err(|error| error.to_string())?;
@@ -661,7 +682,7 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }
