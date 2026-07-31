@@ -17,6 +17,34 @@ struct DatabaseStatus {
     schema_version: u32,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DashboardAccount {
+    id: String,
+    name: String,
+    account_type: String,
+    balance_cents: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DashboardTransaction {
+    id: String,
+    transaction_date: String,
+    description: String,
+    account_name: String,
+    amount_cents: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DashboardData {
+    income_cents: i64,
+    spending_cents: i64,
+    accounts: Vec<DashboardAccount>,
+    recent_transactions: Vec<DashboardTransaction>,
+}
+
 fn database_key() -> Result<String, String> {
     let entry = Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|error| error.to_string())?;
     match entry.get_password() {
@@ -82,9 +110,46 @@ fn database_status(app: AppHandle) -> Result<DatabaseStatus, String> {
     Ok(DatabaseStatus { database_path: path, encrypted: true, schema_version })
 }
 
+#[tauri::command]
+fn dashboard_data(app: AppHandle) -> Result<DashboardData, String> {
+    let (connection, _) = open_database(&app)?;
+    let (income_cents, spending_cents) = connection.query_row(
+        "SELECT
+           COALESCE(SUM(CASE WHEN amount_cents > 0 AND transaction_date >= date('now', 'start of month') THEN amount_cents ELSE 0 END), 0),
+           COALESCE(-SUM(CASE WHEN amount_cents < 0 AND transaction_date >= date('now', 'start of month') THEN amount_cents ELSE 0 END), 0)
+         FROM transactions",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|error| error.to_string())?;
+
+    let mut account_statement = connection.prepare(
+        "SELECT a.id, a.name, a.type, a.opening_balance_cents + COALESCE(SUM(t.amount_cents), 0)
+         FROM accounts a
+         LEFT JOIN transactions t ON t.account_id = a.id
+         GROUP BY a.id, a.name, a.type, a.opening_balance_cents
+         ORDER BY a.name COLLATE NOCASE",
+    ).map_err(|error| error.to_string())?;
+    let accounts = account_statement.query_map([], |row| Ok(DashboardAccount {
+        id: row.get(0)?, name: row.get(1)?, account_type: row.get(2)?, balance_cents: row.get(3)?,
+    })).map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+
+    let mut transaction_statement = connection.prepare(
+        "SELECT t.id, t.transaction_date, t.description, a.name, t.amount_cents
+         FROM transactions t JOIN accounts a ON a.id = t.account_id
+         ORDER BY t.transaction_date DESC, t.created_at DESC LIMIT 6",
+    ).map_err(|error| error.to_string())?;
+    let recent_transactions = transaction_statement.query_map([], |row| Ok(DashboardTransaction {
+        id: row.get(0)?, transaction_date: row.get(1)?, description: row.get(2)?, account_name: row.get(3)?, amount_cents: row.get(4)?,
+    })).map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+
+    Ok(DashboardData { income_cents, spending_cents, accounts, recent_transactions })
+}
+
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status])
+        .invoke_handler(tauri::generate_handler![database_status, dashboard_data])
         .run(tauri::generate_context!())
         .expect("error while running Family Finance");
 }
