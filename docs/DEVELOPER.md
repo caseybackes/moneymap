@@ -44,6 +44,9 @@ Use the bundled current Node runtime when the system Node version is too old for
 ```powershell
 $node24 = 'C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
 & $node24 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js' run build
+
+# Build and replace the one canonical React/Tauri dev executable.
+.\scripts\publish-tauri-dev.ps1
 ```
 
 ## Local development commands
@@ -67,6 +70,8 @@ The repository pins the SDK in `global.json`; `.tooling\dotnet\dotnet.exe` is us
 If `.tooling\dotnet\dotnet.exe` is absent, use a compatible `dotnet` SDK on `PATH`.
 
 Development output is framework-dependent at `src\FamilyFinance.App\bin\Debug\net10.0\FamilyFinance.exe`. The canonical Windows release output is `artifacts\windows\win-x64\FamilyFinance.exe`; Linux output is `artifacts\linux\linux-x64`.
+
+The React/Tauri dev executable is always replaced in `artifacts\windows\dev\FamilyFinance.exe`. Do not create timestamped or per-build artifact folders.
 
 ## Local data and constraints
 
