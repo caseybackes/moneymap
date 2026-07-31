@@ -187,9 +187,11 @@ function SandboxLinkButton({ onImported }: { onImported: () => void }) {
 
 function PlaidLinkLauncher({ session, onDone, onCancelled }: { session: SandboxLinkSession; onDone: () => void; onCancelled: () => void }) {
   const [status, setStatus] = useState("Opening Plaid Link…");
+  const completingRef = useRef(false);
   const { open, ready } = usePlaidLink({
     token: session.linkToken,
     onSuccess: async (publicToken, metadata) => {
+      completingRef.current = true;
       setStatus("Importing encrypted Sandbox records…");
       try {
         await invoke<number>("complete_plaid_sandbox_link", { input: {
@@ -199,7 +201,7 @@ function PlaidLinkLauncher({ session, onDone, onCancelled }: { session: SandboxL
         onDone();
       } catch (reason) { setStatus(`Import failed: ${String(reason)}`); }
     },
-    onExit: () => onCancelled(),
+    onExit: () => { if (!completingRef.current) onCancelled(); },
   });
   useEffect(() => { if (ready) open(); }, [open, ready]);
   return <div className="connect-card sandbox-link-card"><span>↗</span><strong>{status}</strong><small>{ready ? "Complete or cancel the Plaid window." : "Loading Plaid Link…"}</small></div>;
