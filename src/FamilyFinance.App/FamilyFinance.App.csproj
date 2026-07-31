@@ -2,10 +2,14 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <AssemblyName>FamilyFinance</AssemblyName>
+    <ApplicationIcon>Assets\family-finance.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\FamilyFinance.Domain\FamilyFinance.Domain.csproj" />
     <ProjectReference Include="..\FamilyFinance.Data\FamilyFinance.Data.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\family-finance.ico" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Avalonia" />

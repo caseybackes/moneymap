@@ -116,6 +116,38 @@ public sealed class LedgerRepository(LocalDatabase database)
         return true;
     }
 
+    /// <summary>Development-only cleanup for a named imported connection. Manual records are never affected.</summary>
+    public void ClearImportedConnection(string connectionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionId);
+        using var connection = database.OpenConnection();
+        using var databaseTransaction = connection.BeginTransaction();
+        using (var entries = connection.CreateCommand())
+        {
+            entries.Transaction = databaseTransaction;
+            entries.CommandText = "DELETE FROM transactions WHERE id IN (SELECT transaction_id FROM imported_transactions WHERE connection_id = $connectionId);";
+            entries.Parameters.AddWithValue("$connectionId", connectionId);
+            entries.ExecuteNonQuery();
+        }
+        using (var markers = connection.CreateCommand())
+        {
+            markers.Transaction = databaseTransaction;
+            markers.CommandText = "DELETE FROM imported_transactions WHERE connection_id = $connectionId;";
+            markers.Parameters.AddWithValue("$connectionId", connectionId);
+            markers.ExecuteNonQuery();
+        }
+        databaseTransaction.Commit();
+    }
+
+    public void DeleteAccount(Guid accountId)
+    {
+        using var connection = database.OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM accounts WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", accountId.ToString("D"));
+        if (command.ExecuteNonQuery() != 1) throw new KeyNotFoundException($"Account '{accountId:D}' does not exist.");
+    }
+
     /// <summary>
     /// Saves a current ledger entry and the future schedule created from it as one unit of work.
     /// A failure in either insert leaves neither record persisted.

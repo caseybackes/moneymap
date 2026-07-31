@@ -33,6 +33,7 @@ public sealed partial class MainWindow : Window
     private DateOnly _calendarMonth = new(DateTime.Today.Year, DateTime.Today.Month, 1);
     private Action? _refreshCurrentView;
     private Flyout? _calendarDateFlyout;
+    private int? _dashboardRangeMonths = 1;
 
     public MainWindow() : this(CreateDefaultLedger())
     {
@@ -83,7 +84,9 @@ public sealed partial class MainWindow : Window
         Grid.SetRow(_content, 1);
         main.Children.Add(_content);
 
-        var root = new Grid { ColumnDefinitions = new ColumnDefinitions("64,*") };
+        // Keep an acrylic backdrop, but always draw a dark tinted base under application content.
+        // A fully transparent root lets arbitrary desktop/browser colors destroy text contrast.
+        var root = new Grid { ColumnDefinitions = new ColumnDefinitions("64,*"), Background = Brush.Parse("#2A313B") };
         root.Children.Add(new Border { Background = RailBrush, Child = navigation });
         Grid.SetColumn(main, 1);
         root.Children.Add(main);
@@ -118,47 +121,68 @@ public sealed partial class MainWindow : Window
         var now = DateOnly.FromDateTime(DateTime.Today);
         var projectionDate = now.AddMonths(3);
         var projectedOccurrences = _ledger.GetScheduledOccurrences(now, projectionDate);
-        var summary = FinancialSummaries.ForPeriod(accounts, transactions, now.Year, now.Month);
-        var panel = new StackPanel { Spacing = 24 };
-        var summaries = new Grid { ColumnDefinitions = new ColumnDefinitions("*,*,*"), ColumnSpacing = 16 };
-        summaries.Children.Add(Summary("Total balance", summary.TotalBalance.Amount));
-        var incomeCard = Summary("Income this month", summary.Income.Amount); Grid.SetColumn(incomeCard, 1); summaries.Children.Add(incomeCard);
-        var spendingCard = Summary("Spending this month", summary.Spending.Amount); Grid.SetColumn(spendingCard, 2); summaries.Children.Add(spendingCard);
-        panel.Children.Add(summaries);
-        panel.Children.Add(new TextBlock { Text = "Accounts", FontSize = 18, FontWeight = FontWeight.SemiBold });
+        var rangeStart = DashboardRangeStart(transactions, now, _dashboardRangeMonths);
+        var periodTransactions = transactions.Where(item => item.Date >= rangeStart && item.Date <= now).ToArray();
+        var income = periodTransactions.Where(item => item.Amount.Amount > 0).Sum(item => item.Amount.Amount);
+        var spending = -periodTransactions.Where(item => item.Amount.Amount < 0).Sum(item => item.Amount.Amount);
+        var currentNetWorth = accounts.Sum(account => AccountBalanceCalculator.Calculate(account, transactions, now).Amount);
+        var panel = new StackPanel { Spacing = 26 };
+        var hero = new Grid { ColumnDefinitions = new ColumnDefinitions("1.7*,*"), ColumnSpacing = 16 };
+        var netWorth = new StackPanel { Spacing = 6 };
+        netWorth.Children.Add(new TextBlock { Text = "NET WORTH", FontSize = 11, FontWeight = FontWeight.SemiBold, Opacity = .58 });
+        netWorth.Children.Add(new TextBlock { Text = Format(currentNetWorth), FontSize = 34, FontWeight = FontWeight.Bold });
+        netWorth.Children.Add(new TextBlock { Text = "Across all local accounts", Opacity = .62, FontSize = 12 });
+        netWorth.Children.Add(NetWorthSparkline(accounts, transactions, rangeStart, now));
+        hero.Children.Add(new Border { Background = SurfaceBrush, BorderBrush = Brush.Parse("#263243"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), Padding = new Thickness(20), Child = netWorth });
+        var month = new StackPanel { Spacing = 12 };
+        month.Children.Add(new TextBlock { Text = DashboardRangeLabel(_dashboardRangeMonths), FontSize = 11, FontWeight = FontWeight.SemiBold, Opacity = .58 });
+        month.Children.Add(CompactMetric("Income", income, Brush.Parse("#48C78E")));
+        month.Children.Add(CompactMetric("Spending", spending, Brush.Parse("#F08A78")));
+        var periodButtons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(0, 4, 0, 0) };
+        foreach (var (label, months) in new (string Label, int? Months)[] { ("1M", 1), ("3M", 3), ("6M", 6), ("1Y", 12), ("ALL", null) })
+        {
+            var button = new Button { Content = label, FontSize = 11, Padding = new Thickness(9, 4), Background = _dashboardRangeMonths == months ? Brush.Parse("#335D99") : Brush.Parse("#202936") };
+            button.Click += (_, _) => { _dashboardRangeMonths = months; ShowDashboard(); };
+            periodButtons.Children.Add(button);
+        }
+        month.Children.Add(periodButtons);
+        var monthCard = new Border { Background = SurfaceRaisedBrush, BorderBrush = Brush.Parse("#263243"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), Padding = new Thickness(20), Child = month };
+        Grid.SetColumn(monthCard, 1);
+        hero.Children.Add(monthCard);
+        panel.Children.Add(hero);
+        var accountsWidget = new StackPanel { Spacing = 12 };
+        accountsWidget.Children.Add(new TextBlock { Text = "Accounts & cards", FontSize = 16, FontWeight = FontWeight.SemiBold });
         if (accounts.Count == 0)
         {
-            panel.Children.Add(Empty("No accounts yet. Add an account to begin tracking balances.", "Add account", ShowAccounts));
+            accountsWidget.Children.Add(Empty("No accounts yet. Add an account to begin tracking balances.", "Add account", ShowAccounts));
         }
         else
         {
+            var accountCards = new WrapPanel { ItemSpacing = 12, LineSpacing = 12 };
             foreach (var account in accounts)
             {
                 var projection = AccountBalanceProjector.Calculate(account, transactions, projectedOccurrences, projectionDate);
-                panel.Children.Add(new Border
+                accountCards.Children.Add(new Border
                 {
-                    Padding = new Thickness(14, 10),
+                    Width = 270, Padding = new Thickness(16, 14), CornerRadius = new CornerRadius(9),
                     Background = SurfaceBrush,
-                    Child = new DockPanel
+                    BorderBrush = Brush.Parse("#263243"), BorderThickness = new Thickness(1),
+                    Child = new StackPanel
                     {
+                        Spacing = 5,
                         Children =
                         {
-                            new TextBlock { Text = account.Name },
-                            new StackPanel
-                            {
-                                HorizontalAlignment = HorizontalAlignment.Right,
-                                Spacing = 2,
-                                Children =
-                                {
-                                    new TextBlock { Text = Format(projection.LedgerBalance.Amount), FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Right },
-                                    new TextBlock { Text = $"Projected {projectionDate:MMM d}: {Format(projection.ProjectedBalance.Amount)}", Opacity = .7, FontSize = 12, HorizontalAlignment = HorizontalAlignment.Right }
-                                }
-                            }
+                            new TextBlock { Text = account.Type == AccountType.CreditCard ? "CREDIT CARD" : account.Type.ToString().ToUpperInvariant(), FontSize = 10, FontWeight = FontWeight.SemiBold, Opacity = .58 },
+                            new TextBlock { Text = account.Name, FontWeight = FontWeight.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis },
+                            new TextBlock { Text = Format(projection.LedgerBalance.Amount), FontSize = 22, FontWeight = FontWeight.Bold, Margin = new Thickness(0, 7, 0, 0) },
+                            new TextBlock { Text = $"Projected {projectionDate:MMM d}: {Format(projection.ProjectedBalance.Amount)}", Opacity = .62, FontSize = 11 }
                         }
                     }
                 });
             }
+            accountsWidget.Children.Add(accountCards);
         }
+        panel.Children.Add(new Border { Background = SurfaceBrush, BorderBrush = Brush.Parse("#263243"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), Padding = new Thickness(16), Child = accountsWidget });
         var schedules = _ledger.GetScheduledTransactions();
         var suggestions = RecurringTransactionDetector.Detect(transactions)
             .Where(suggestion => !_dismissedRecurringSuggestions.Contains(RecurringSuggestionKey.From(suggestion)))
@@ -168,10 +192,11 @@ public sealed partial class MainWindow : Window
                 schedule.Recurrence == suggestion.Recurrence &&
                 RecurringTransactionDetector.NormalizeDescription(schedule.Description) == suggestion.NormalizedDescription))
             .ToArray();
-        panel.Children.Add(new TextBlock { Text = "Recurring suggestions", FontSize = 18, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 8, 0, 0) });
+        var suggestionsWidget = new StackPanel { Spacing = 9 };
+        suggestionsWidget.Children.Add(new TextBlock { Text = "Recurring suggestions", FontSize = 16, FontWeight = FontWeight.SemiBold });
         if (suggestions.Length == 0)
         {
-            panel.Children.Add(new TextBlock { Text = "No repeating ledger patterns to review yet.", Opacity = .7 });
+            // Empty review widgets intentionally collapse.
         }
         else
         {
@@ -204,23 +229,37 @@ public sealed partial class MainWindow : Window
                 };
                 actions.Children.Add(dismiss);
                 card.Children.Add(actions);
-                panel.Children.Add(new Border { Background = SurfaceBrush, Padding = new Thickness(14, 12), CornerRadius = new CornerRadius(8), Child = card });
+                suggestionsWidget.Children.Add(new Border { Background = SurfaceRaisedBrush, Padding = new Thickness(14, 12), CornerRadius = new CornerRadius(8), Child = card });
             }
         }
-        panel.Children.Add(new TextBlock { Text = "Upcoming", FontSize = 18, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 8, 0, 0) });
+        if (suggestions.Length > 0)
+        {
+            panel.Children.Add(new Border { Background = SurfaceBrush, BorderBrush = Brush.Parse("#263243"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), Padding = new Thickness(16), Child = suggestionsWidget });
+        }
         var upcoming = projectedOccurrences.Take(5).ToArray();
+        var upcomingWidget = new StackPanel { Spacing = 10 };
+        upcomingWidget.Children.Add(new TextBlock { Text = "Upcoming", FontSize = 16, FontWeight = FontWeight.SemiBold });
         if (upcoming.Length == 0)
         {
-            panel.Children.Add(Empty("No scheduled transactions coming up.", "Add scheduled transaction", ShowScheduledTransactions));
+            upcomingWidget.Children.Add(Empty("No scheduled transactions coming up.", "Add scheduled transaction", ShowScheduledTransactions));
         }
         else
         {
             foreach (var occurrence in upcoming)
             {
-                panel.Children.Add(new TextBlock { Text = $"{occurrence.Date:MMM d} · {occurrence.Schedule.Description} · {Format(occurrence.Schedule.Amount.Amount)}" });
+                var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), ColumnSpacing = 10 };
+                row.Children.Add(new TextBlock { Text = occurrence.Date.ToString("MMM d"), Opacity = .62, VerticalAlignment = VerticalAlignment.Center });
+                var description = new TextBlock { Text = occurrence.Schedule.Description, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
+                Grid.SetColumn(description, 1);
+                row.Children.Add(description);
+                var amount = new TextBlock { Text = Format(occurrence.Schedule.Amount.Amount), FontWeight = FontWeight.SemiBold, VerticalAlignment = VerticalAlignment.Center };
+                Grid.SetColumn(amount, 2);
+                row.Children.Add(amount);
+                upcomingWidget.Children.Add(row);
             }
         }
-        _content.Content = new ScrollViewer { Content = panel };
+        panel.Children.Add(new Border { Background = SurfaceBrush, BorderBrush = Brush.Parse("#263243"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10), Padding = new Thickness(16), Child = upcomingWidget });
+        _content.Content = new ScrollViewer { Content = panel, Offset = new Vector(0, 0) };
     }
 
     private static Border Summary(string label, decimal value) => new()
@@ -229,6 +268,70 @@ public sealed partial class MainWindow : Window
         BorderBrush = Brush.Parse("#263243"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(8),
         Child = new StackPanel { Spacing = 5, Children = { new TextBlock { Text = label, Opacity = .7 }, new TextBlock { Text = Format(value), FontSize = 23, FontWeight = FontWeight.SemiBold } } }
     };
+
+    private static Border CompactMetric(string label, decimal value, IBrush accent) => new()
+    {
+        Background = Brush.Parse("#121923"), CornerRadius = new CornerRadius(7), Padding = new Thickness(12, 9),
+        Child = new DockPanel
+        {
+            Children =
+            {
+                new TextBlock { Text = label, Opacity = .66, VerticalAlignment = VerticalAlignment.Center },
+                new TextBlock { Text = Format(value), Foreground = accent, FontWeight = FontWeight.SemiBold, HorizontalAlignment = HorizontalAlignment.Right }
+            }
+        }
+    };
+
+    private static DateOnly DashboardRangeStart(IReadOnlyList<Transaction> transactions, DateOnly now, int? months)
+    {
+        if (months is null)
+        {
+            return transactions.Count == 0 ? now : transactions.Min(item => item.Date);
+        }
+
+        return now.AddMonths(-months.Value).AddDays(1);
+    }
+
+    private static string DashboardRangeLabel(int? months) => months switch
+    {
+        1 => "LAST 1 MONTH",
+        3 => "LAST 3 MONTHS",
+        6 => "LAST 6 MONTHS",
+        12 => "LAST 1 YEAR",
+        _ => "ALL ACTIVITY"
+    };
+
+    private static Control NetWorthSparkline(IReadOnlyList<Account> accounts, IReadOnlyList<Transaction> transactions, DateOnly start, DateOnly end)
+    {
+        const double width = 420;
+        const double height = 94;
+        var baseline = accounts.Sum(account => account.OpeningBalance.Amount) +
+            transactions.Where(item => item.Date < start).Sum(item => item.Amount.Amount);
+        var points = new List<(DateOnly Date, decimal Balance)> { (start, baseline) };
+        foreach (var transaction in transactions.Where(item => item.Date >= start && item.Date <= end).OrderBy(item => item.Date))
+        {
+            baseline += transaction.Amount.Amount;
+            points.Add((transaction.Date, baseline));
+        }
+        if (points.Count == 1) points.Add((end, baseline));
+        var min = points.Min(point => point.Balance);
+        var max = points.Max(point => point.Balance);
+        var range = Math.Max(max - min, 1m);
+        var first = points[0].Date;
+        var days = Math.Max(end.DayNumber - first.DayNumber, 1);
+        var linePoints = new Points(points.Select(point => new Point(
+            2 + (point.Date.DayNumber - first.DayNumber) * (width - 4) / days,
+            height - 8 - (double)((point.Balance - min) * (decimal)(height - 18) / range))));
+        return new Avalonia.Controls.Shapes.Polyline
+        {
+            Points = linePoints,
+            Stroke = Brush.Parse("#69D0FF"),
+            StrokeThickness = 2.5,
+            Width = width,
+            Height = height,
+            Margin = new Thickness(0, 12, 0, 0)
+        };
+    }
 
     private Control Empty(string text, string actionText, Action action)
     {
@@ -280,11 +383,34 @@ public sealed partial class MainWindow : Window
             var connection = root.GetProperty("connection");
             var connectionId = connection.GetProperty("id").GetString()!;
             var institutionName = connection.GetProperty("institutionName").GetString() ?? "Plaid Sandbox";
-            var account = _ledger.GetAccounts().FirstOrDefault(item => item.Name == institutionName + " Checking");
-            if (account is null)
+            var localAccounts = _ledger.GetAccounts().ToList();
+            var legacySandboxAccount = localAccounts.FirstOrDefault(item => item.Name == institutionName + " Checking");
+            var hasCurrentSandboxAccounts = localAccounts.Any(item => item.Name.StartsWith(institutionName + " • ", StringComparison.Ordinal));
+            if (legacySandboxAccount is not null && !hasCurrentSandboxAccounts)
             {
-                account = new Account(Guid.NewGuid(), institutionName + " Checking", AccountType.Checking, new Money(0m));
-                _ledger.CreateAccount(account);
+                // Upgrade the original one-account demo import to Plaid's real Sandbox account model.
+                _ledger.ClearImportedConnection(connectionId);
+                _ledger.DeleteAccount(legacySandboxAccount.Id);
+                localAccounts.Remove(legacySandboxAccount);
+            }
+            var accountsByProviderId = new Dictionary<string, Account>(StringComparer.Ordinal);
+            foreach (var providerAccount in root.GetProperty("accounts").EnumerateArray())
+            {
+                var providerAccountId = providerAccount.GetProperty("account_id").GetString();
+                if (string.IsNullOrWhiteSpace(providerAccountId)) continue;
+                var providerName = providerAccount.TryGetProperty("official_name", out var officialName) && officialName.ValueKind == JsonValueKind.String
+                    ? officialName.GetString() : providerAccount.GetProperty("name").GetString();
+                var localName = institutionName + " • " + (providerName ?? "Account");
+                var account = localAccounts.FirstOrDefault(item => item.Name == localName);
+                if (account is null)
+                {
+                    var type = providerAccount.TryGetProperty("type", out var typeValue) ? typeValue.GetString() : null;
+                    var subtype = providerAccount.TryGetProperty("subtype", out var subtypeValue) ? subtypeValue.GetString() : null;
+                    account = new Account(Guid.NewGuid(), localName, PlaidAccountType(type, subtype), new Money(0m));
+                    _ledger.CreateAccount(account);
+                    localAccounts.Add(account);
+                }
+                accountsByProviderId[providerAccountId] = account;
             }
 
             var imported = 0;
@@ -298,6 +424,8 @@ public sealed partial class MainWindow : Window
                 if (string.IsNullOrWhiteSpace(description)) description = "Imported transaction";
                 var plaidAmount = amountValue.GetDecimal();
                 if (plaidAmount == 0m) continue;
+                var providerAccountId = item.TryGetProperty("account_id", out var accountIdValue) ? accountIdValue.GetString() : null;
+                if (string.IsNullOrWhiteSpace(providerAccountId) || !accountsByProviderId.TryGetValue(providerAccountId, out var account)) continue;
                 var entry = new Transaction(Guid.NewGuid(), account.Id, date, description, new Money(-plaidAmount), null,
                     "Imported from Plaid Sandbox", DateTimeOffset.UtcNow);
                 if (_ledger.TryImportTransaction("plaid", transactionId, connectionId, entry)) imported++;
@@ -305,7 +433,7 @@ public sealed partial class MainWindow : Window
 
             await Message("Plaid Sandbox import", imported == 0
                 ? "No new test transactions were available. Existing imported records were left untouched."
-                : $"Imported {imported} Plaid Sandbox transactions into {account.Name}.");
+                : $"Imported {imported} Plaid Sandbox transactions across {accountsByProviderId.Count} accounts.");
             ShowAccounts();
         }
         catch (Exception exception)
@@ -313,6 +441,17 @@ public sealed partial class MainWindow : Window
             await Message("Plaid Sandbox import failed", exception.Message);
         }
     }
+
+    private static AccountType PlaidAccountType(string? type, string? subtype) =>
+        type?.ToLowerInvariant() switch
+        {
+            "credit" => AccountType.CreditCard,
+            "investment" => AccountType.Investment,
+            "depository" when subtype?.Equals("savings", StringComparison.OrdinalIgnoreCase) == true => AccountType.Savings,
+            "depository" => AccountType.Checking,
+            "loan" => AccountType.Other,
+            _ => AccountType.Other
+        };
 
     private async Task ShowAccountDialog()
     {
@@ -755,9 +894,10 @@ public sealed partial class MainWindow : Window
             RowSpacing = 10,
             HorizontalAlignment = HorizontalAlignment.Stretch
         };
-        var add = new Button { Content = "Add transaction", HorizontalAlignment = HorizontalAlignment.Left };
+        var toolbar = new DockPanel();
+        var add = new Button { Content = "+  Add transaction", HorizontalAlignment = HorizontalAlignment.Left };
         add.Click += async (_, _) => await ShowTransactionDialog();
-        table.Children.Add(add);
+        toolbar.Children.Add(add);
 
         var rows = _ledger.GetLedgerTransactions();
         var search = new TextBox { PlaceholderText = "Name or description", Width = 190 };
@@ -783,8 +923,14 @@ public sealed partial class MainWindow : Window
         var filterError = new TextBlock { Foreground = Brushes.Firebrick, VerticalAlignment = VerticalAlignment.Center };
         var filters = new WrapPanel { ItemSpacing = 8, LineSpacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
         foreach (var control in new Control[] { search, category, minimumAmount, maximumAmount, fromDate, toDate, apply, reset, filterError }) filters.Children.Add(control);
-        Grid.SetRow(filters, 1);
-        table.Children.Add(filters);
+        var filterPanel = new Border { Background = SurfaceRaisedBrush, BorderBrush = Brush.Parse("#263243"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(8), Padding = new Thickness(12), Child = filters, IsVisible = false };
+        var filterToggle = new Button { Content = "Filters", HorizontalAlignment = HorizontalAlignment.Right };
+        filterToggle.Click += (_, _) => filterPanel.IsVisible = !filterPanel.IsVisible;
+        DockPanel.SetDock(filterToggle, Dock.Right);
+        toolbar.Children.Add(filterToggle);
+        table.Children.Add(toolbar);
+        Grid.SetRow(filterPanel, 1);
+        table.Children.Add(filterPanel);
 
         const string ledgerColumns = "130,2*,1.2*,1.2*,2*,120,160";
         var header = LedgerTableRow(ledgerColumns, TableHeaderBrush);
@@ -1367,8 +1513,20 @@ public sealed partial class MainWindow : Window
 
     private static Window Dialog(string title, IEnumerable<Control> children) => new()
     {
-        Title = title, Width = 450, SizeToContent = SizeToContent.Height, WindowStartupLocation = WindowStartupLocation.CenterOwner,
-        Content = new StackPanel { Margin = new Thickness(22), Spacing = 12, Children = { } }.Also(panel => { foreach (var child in children) panel.Children.Add(child); })
+        Title = title,
+        Width = 470,
+        SizeToContent = SizeToContent.Height,
+        WindowStartupLocation = WindowStartupLocation.CenterOwner,
+        Background = Brush.Parse("#1B2635"),
+        Content = new Border
+        {
+            Background = Brush.Parse("#1B2635"),
+            BorderBrush = Brush.Parse("#5A7494"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10),
+            BoxShadow = new BoxShadows(new BoxShadow { Blur = 28, OffsetY = 10, Color = Color.Parse("#AA000000") }),
+            Child = new StackPanel { Margin = new Thickness(24), Spacing = 12, Children = { } }.Also(panel => { foreach (var child in children) panel.Children.Add(child); })
+        }
     };
 
     private async Task Message(string title, string text)

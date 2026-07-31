@@ -87,6 +87,12 @@ async function syncTransactions(env, connection) {
   } while (true);
 }
 
+async function getAccounts(env, connection) {
+  const accessToken = await decryptToken(connection.access_token_ciphertext, connection.access_token_iv, env.TOKEN_ENCRYPTION_KEY);
+  const result = await plaidPost(env, "/accounts/get", { access_token: accessToken });
+  return result.accounts ?? [];
+}
+
 function authorize(request, env) {
   if (!env.BROKER_API_TOKEN) {
     return problem(503, "broker_not_configured", "The broker has not been configured.");
@@ -142,7 +148,8 @@ export default {
         // Local de-duplication, keyed by Plaid transaction id, makes this idempotent.
         connection.sync_cursor = null;
         const synced = await syncTransactions(env, connection);
-        return json({ connection: { id: connection.id, institutionName: connection.institution_name }, ...synced });
+        const accounts = await getAccounts(env, connection);
+        return json({ connection: { id: connection.id, institutionName: connection.institution_name }, accounts, ...synced });
       } catch {
         return problem(502, "plaid_sandbox_error", "Plaid Sandbox sync failed.");
       }

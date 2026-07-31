@@ -5,7 +5,7 @@
   <Application.Styles>
     <FluentTheme />
     <Style Selector="Window">
-      <Setter Property="Background" Value="#0D1117" />
+      <Setter Property="Background" Value="#2A313B" />
       <Setter Property="Foreground" Value="#E8EDF5" />
     </Style>
     <Style Selector="TextBlock">
