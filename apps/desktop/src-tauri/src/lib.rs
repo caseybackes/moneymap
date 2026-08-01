@@ -158,17 +158,22 @@ fn new_id() -> String {
     STANDARD_NO_PAD.encode(bytes)
 }
 
-fn database_key() -> Result<String, String> {
+fn database_key(database_exists: bool) -> Result<String, String> {
     let entry = Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|error| error.to_string())?;
     match entry.get_password() {
         Ok(key) if !key.is_empty() => Ok(key),
-        Ok(_) | Err(keyring::Error::NoEntry) => {
+        Ok(_) | Err(keyring::Error::NoEntry) if !database_exists => {
             let mut bytes = [0_u8; 32];
             rand::rng().fill_bytes(&mut bytes);
             let key = STANDARD_NO_PAD.encode(bytes);
             entry.set_password(&key).map_err(|error| error.to_string())?;
-            Ok(key)
+            let persisted_key = entry.get_password().map_err(|error| format!("Database key could not be verified after saving to the operating-system credential store: {error}"))?;
+            if persisted_key != key {
+                return Err("Database key verification failed after saving to the operating-system credential store.".to_string());
+            }
+            Ok(persisted_key)
         }
+        Ok(_) | Err(keyring::Error::NoEntry) => Err("The encrypted local database exists but its key is unavailable in the operating-system credential store. Family Finance will not generate a replacement key because it would make the existing database unreadable.".to_string()),
         Err(error) => Err(error.to_string()),
     }
 }
@@ -200,7 +205,7 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
 
 fn open_database_inner(app: &AppHandle) -> Result<(Connection, String), String> {
     let path = database_path(app)?;
-    let key = database_key()?;
+    let key = database_key(path.exists())?;
     let connection = Connection::open(&path).map_err(|error| error.to_string())?;
     connection.pragma_update(None, "key", &key).map_err(|error| error.to_string())?;
     connection.execute_batch(
