@@ -68,6 +68,9 @@ export function App() {
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [connections, setConnections] = useState<ConnectedInstitution[]>([]);
   const [rangeMonths, setRangeMonths] = useState<number | null>(1);
+  const [startupSyncing, setStartupSyncing] = useState(true);
+  const [startupSyncMessage, setStartupSyncMessage] = useState("Opening local finance profile…");
+  const [startupSyncWarning, setStartupSyncWarning] = useState<string | null>(null);
   const storeEpoch = useRef(0);
 
   const refresh = useCallback(() => {
@@ -77,8 +80,35 @@ export function App() {
       setDashboard(data); setError(null);
     }).catch((reason: unknown) => { if (epoch === storeEpoch.current) setError(String(reason)); });
   }, []);
-  useEffect(refresh, [refresh]);
-  useEffect(() => { const epoch = storeEpoch.current; void invoke<Category[]>("categories_data").then((data) => { if (epoch === storeEpoch.current) setCategories(data); }).catch((reason: unknown) => { if (epoch === storeEpoch.current) setError(String(reason)); }); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const epoch = storeEpoch.current;
+      try {
+        const [initialDashboard, initialCategories, initialConnections, initialSchedules] = await Promise.all([
+          invoke<DashboardData>("dashboard_data"), invoke<Category[]>("categories_data"), invoke<ConnectedInstitution[]>("plaid_connections_data"), invoke<Schedule[]>("scheduled_data")
+        ]);
+        if (cancelled || epoch !== storeEpoch.current) return;
+        setDashboard(initialDashboard); setCategories(initialCategories); setConnections(initialConnections); setSchedules(initialSchedules); setError(null);
+        if (initialConnections.length === 0) { setStartupSyncMessage("Local profile ready."); return; }
+        setStartupSyncMessage(`Refreshing ${initialConnections.length} connected Sandbox ${initialConnections.length === 1 ? "institution" : "institutions"}…`);
+        try {
+          await invoke<number>("sync_plaid_sandbox_connections");
+          const [refreshedDashboard, refreshedConnections, refreshedSchedules] = await Promise.all([
+            invoke<DashboardData>("dashboard_data"), invoke<ConnectedInstitution[]>("plaid_connections_data"), invoke<Schedule[]>("scheduled_data")
+          ]);
+          if (cancelled || epoch !== storeEpoch.current) return;
+          setDashboard(refreshedDashboard); setConnections(refreshedConnections); setSchedules(refreshedSchedules);
+          setStartupSyncMessage("Connected Sandbox accounts are up to date.");
+        } catch (reason) {
+          if (cancelled || epoch !== storeEpoch.current) return;
+          setStartupSyncWarning(`Could not refresh Sandbox accounts. Showing saved local data. ${String(reason)}`);
+        }
+      } catch (reason) { if (!cancelled && epoch === storeEpoch.current) setError(String(reason)); }
+      finally { if (!cancelled && epoch === storeEpoch.current) setStartupSyncing(false); }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   useEffect(() => { if (dashboard) { const epoch = storeEpoch.current; void invoke<RecurringSuggestion[]>("recurring_suggestions").then((data) => { if (epoch === storeEpoch.current) setSuggestions(data); }).catch((reason: unknown) => { if (epoch === storeEpoch.current) setError(String(reason)); }); } }, [dashboard]);
   useEffect(() => { const epoch = storeEpoch.current; const report = (reason: unknown) => { if (epoch === storeEpoch.current) setError(String(reason)); }; if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then((data) => { if (epoch === storeEpoch.current) setLedger(data); }).catch(report); if (view === "dashboard" || view === "scheduled" || view === "calendar") void invoke<Schedule[]>("scheduled_data").then((data) => { if (epoch === storeEpoch.current) setSchedules(data); }).catch(report); if (view === "accounts") void invoke<ConnectedInstitution[]>("plaid_connections_data").then((data) => { if (epoch === storeEpoch.current) setConnections(data); }).catch(report); }, [view]);
 
@@ -115,6 +145,8 @@ export function App() {
     </aside>
     <section className="page">
       <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" || view === "scenarios" ? "PLANNING" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : view === "categories" ? "Categories" : view === "scenarios" ? "Scenario modeling" : "Ledger"}</h1></div>{view !== "scenarios" && view !== "categories" ? <button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : view === "accounts" ? "account" : "transaction")}>{view === "scheduled" ? "Add schedule" : view === "accounts" ? "Add account" : "Add transaction"}</button> : null}</header>
+      {startupSyncing ? <div className="startup-sync" role="status" aria-live="polite"><span className="sync-spinner" /><span><strong>{startupSyncMessage}</strong><small>Your dashboard remains available while the refresh runs.</small></span></div> : null}
+      {!startupSyncing && startupSyncWarning ? <div className="startup-sync warning"><span>!</span><span><strong>Sandbox refresh did not finish.</strong><small>{startupSyncWarning}</small></span></div> : null}
       {error ? <div className="status error"><strong>Local data store unavailable.</strong><span>{error}</span><p>This file was encrypted with a key that is no longer available on this Windows profile. Starting fresh preserves the unreadable file as an archive and creates a new encrypted store.</p><button disabled={recoveringStore} onClick={() => void recoverLocalStore()}>{recoveringStore ? "Preparing fresh store…" : "Preserve file and start fresh"}</button></div> : null}
       {!dashboard && !error ? <p className="status">Opening encrypted local data store...</p> : null}
       {dashboard && view === "dashboard" ? <div className="dashboard-grid">
