@@ -21,9 +21,9 @@ const KEYRING_SERVICE: &str = "com.caseybackes.moneymap.dev";
 const KEYRING_SERVICE: &str = "com.caseybackes.moneymap";
 const KEYRING_ACCOUNT: &str = "database-key-v2";
 #[cfg(feature = "sandbox-dev")]
-const SANDBOX_BROKER_URL: &str = "https://family-finance-broker.cloud-admin-f91.workers.dev/v1/sandbox/demo-transactions";
+const SANDBOX_BROKER_URL: &str = "https://money-map-broker.cloud-admin-f91.workers.dev/v1/sandbox/demo-transactions";
 #[cfg(feature = "sandbox-dev")]
-const SANDBOX_BROKER_BASE_URL: &str = "https://family-finance-broker.cloud-admin-f91.workers.dev/v1/sandbox";
+const SANDBOX_BROKER_BASE_URL: &str = "https://money-map-broker.cloud-admin-f91.workers.dev/v1/sandbox";
 #[cfg(feature = "sandbox-dev")]
 const TRADESTATION_SIM_BROKER_BASE_URL: &str = "https://money-map-tradestation-sim-broker.cloud-admin-f91.workers.dev";
 #[cfg(feature = "sandbox-dev")]
@@ -206,7 +206,7 @@ fn database_key(database_exists: bool) -> Result<String, String> {
             }
             Ok(persisted_key)
         }
-        Ok(_) | Err(keyring::Error::NoEntry) => Err("The encrypted local database exists but its key is unavailable in the operating-system credential store. Family Finance will not generate a replacement key because it would make the existing database unreadable.".to_string()),
+        Ok(_) | Err(keyring::Error::NoEntry) => Err("The encrypted local database exists but its key is unavailable in the operating-system credential store. Money Map will not generate a replacement key because it would make the existing database unreadable.".to_string()),
         Err(error) => Err(error.to_string()),
     }
 }
@@ -214,12 +214,12 @@ fn database_key(database_exists: bool) -> Result<String, String> {
 fn database_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let directory = app.path().app_local_data_dir().map_err(|error| error.to_string())?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    Ok(directory.join("family-finance-v2.db"))
+    Ok(directory.join("money-map.db"))
 }
 
 fn write_diagnostic(app: &AppHandle, event: &str) {
     let Ok(directory) = app.path().app_local_data_dir() else { return; };
-    let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(directory.join("family-finance.log")) else { return; };
+    let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(directory.join("money-map.log")) else { return; };
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs().to_string())
@@ -412,7 +412,7 @@ fn reset_unavailable_database(app: AppHandle) -> Result<DatabaseStatus, String> 
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| error.to_string())?
             .as_secs();
-        let archive = path.with_file_name(format!("family-finance-v2.unreadable-{timestamp}.db"));
+        let archive = path.with_file_name(format!("money-map.unreadable-{timestamp}.db"));
         fs::rename(&path, &archive).map_err(|error| format!("Could not preserve the unreadable database: {error}"))?;
     }
 
@@ -711,9 +711,9 @@ fn broker_post(path: &str, body: Value, connection_secret: Option<&str>) -> Resu
     let client = reqwest::blocking::Client::new();
     let mut request = client.post(format!("{SANDBOX_BROKER_BASE_URL}/{path}")).json(&body);
     if let Some(secret) = connection_secret {
-        request = request.header("x-family-finance-connection-key", secret);
+        request = request.header("x-money-map-connection-key", secret);
     }
-    let response = request.send().map_err(|error| format!("Could not reach the Family Finance broker: {error}"))?;
+    let response = request.send().map_err(|error| format!("Could not reach the Money Map broker: {error}"))?;
     if !response.status().is_success() {
         return Err(format!("Sandbox broker request failed ({})", response.status()));
     }
@@ -723,8 +723,8 @@ fn broker_post(path: &str, body: Value, connection_secret: Option<&str>) -> Resu
 #[cfg(feature = "sandbox-dev")]
 fn broker_post_empty(path: &str, connection_secret: &str) -> Result<(), String> {
     let response = reqwest::blocking::Client::new().post(format!("{SANDBOX_BROKER_BASE_URL}/{path}"))
-        .header("x-family-finance-connection-key", connection_secret)
-        .send().map_err(|error| format!("Could not reach the Family Finance broker: {error}"))?;
+        .header("x-money-map-connection-key", connection_secret)
+        .send().map_err(|error| format!("Could not reach the Money Map broker: {error}"))?;
     if !response.status().is_success() { return Err(format!("Sandbox broker request failed ({})", response.status())); }
     Ok(())
 }

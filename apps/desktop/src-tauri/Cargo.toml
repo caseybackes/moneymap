@@ -1,5 +1,5 @@
 [package]
-name = "family-finance-desktop"
+name = "money-map-desktop"
 version = "0.1.0"
 description = "Local-first household finance desktop application"
 authors = ["Casey Backes"]
@@ -10,7 +10,7 @@ default = []
 sandbox-dev = []
 
 [lib]
-name = "family_finance_desktop_lib"
+name = "money_map_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

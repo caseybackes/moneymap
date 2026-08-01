@@ -135,7 +135,7 @@ function notImplemented() {
 }
 
 async function authorizeSandboxConnection(request, connection) {
-  const presented = request.headers.get("x-family-finance-connection-key");
+  const presented = request.headers.get("x-money-map-connection-key");
   if (!presented || !connection.owner_secret_hash) return false;
   return (await secretHash(presented)) === connection.owner_secret_hash;
 }

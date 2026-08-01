@@ -1,4 +1,4 @@
-# Family Finance Plaid Broker
+# Money Map Plaid Broker
 
 This Cloudflare Worker is the remote security boundary for Plaid. The desktop app must never contain the Plaid secret or long-lived Plaid access tokens.
 
@@ -6,7 +6,7 @@ This Cloudflare Worker is the remote security boundary for Plaid. The desktop ap
 
 The first deployment exposes `GET /health`, a project page, and privacy page. Plaid Sandbox routes remain unavailable until Cloudflare secrets and the D1 database are configured.
 
-1. Create the Worker named `family-finance-broker` in Cloudflare.
+1. Create the Worker named `money-map-broker` in Cloudflare.
 2. Deploy this source with Wrangler.
 3. Confirm `https://<worker>.workers.dev/health` returns JSON with `status: "ok"`.
 
@@ -30,7 +30,7 @@ The React/Tauri app uses the isolated Sandbox Link lifecycle:
 1. `POST /v1/sandbox/link-token` returns a short-lived Plaid Link token plus a one-time Sandbox session id and secret.
 2. Plaid Link returns a short-lived public token to the desktop app.
 3. `POST /v1/sandbox/link-complete` exchanges that public token at the broker, encrypts the resulting Plaid access token in D1, and returns a new per-connection key.
-4. `POST /v1/sandbox/connections/{id}/sync` requires `x-family-finance-connection-key` and returns account and transaction changes for that connection.
+4. `POST /v1/sandbox/connections/{id}/sync` requires `x-money-map-connection-key` and returns account and transaction changes for that connection.
 
 The connection key is retained only in the encrypted desktop database. These routes are strictly Sandbox-only and do not authorize a real-bank Item.
 
