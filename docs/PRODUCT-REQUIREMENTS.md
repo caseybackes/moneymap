@@ -2,7 +2,7 @@
 
 ## Product intent
 
-Family Finance is an installed, local-first desktop application for one person to model and track their finances across many accounts. It targets Windows 10 first and must remain portable to Linux. It is not a web application.
+Money Map is an installed, local-first desktop application for one person to model and track their finances across many accounts. It targets Windows 10 first and must remain portable to Linux. It is not a web application.
 
 ## Confirmed requirements
 
@@ -54,11 +54,16 @@ Family Finance is an installed, local-first desktop application for one person t
 - Scenarios do not alter the real ledger.
 - AI analysis, when present, interprets calculated scenario results; it is not the scenario input interface.
 - The initial scenario UI supports structured monthly income, spending, contribution, one-time, and horizon inputs. Its projection remains isolated from the ledger. Calendar/ledger scenario overlays and AI analysis remain future work.
+- Financial analysis is the primary product value. Ingestion through manual entry, statement files, or connected accounts exists to build a trustworthy local financial picture for analysis.
+- The analysis roadmap includes explainable merchant clustering, category proposals, category and cash-flow trends, recurring/outlier detection, and drill-down from every insight to underlying records.
+- A later opportunity-analysis layer may assess user-provided account, insurance, and tax information for potential savings or tax-impact questions. It must show evidence, assumptions, uncertainty, and require review; it never makes financial decisions or changes automatically.
 
 ### Data and platform constraints
 
 - Financial data is stored locally in an encrypted SQLCipher database.
 - Sandbox Plaid Link is permitted for development. It uses an owner-controlled Plaid dashboard account, encrypted broker-side token handling, and encrypted local connection metadata. Real-bank connection remains gated on Sandbox verification, review-before-import, consent, and disconnect behavior.
+- Development and production are separate build/deployment environments. Development is Sandbox-only; production cannot contain Sandbox credentials, routes, or reset tools. They use separate Worker deployments and local application data identities.
+- Disconnecting an institution removes the linked access token and all imported account/transaction records associated with that institution from the local database. Reconnection imports a fresh current data set.
 - The implementation stack is React, Tauri/Rust, SQLCipher, and an optional Cloudflare Worker Plaid broker; the legacy Avalonia app remains the behavioral reference during migration.
 - Money is persisted as integer cents.
 

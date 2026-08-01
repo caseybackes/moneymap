@@ -3,14 +3,20 @@ use keyring::Entry;
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "sandbox-dev")]
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
 use tauri::{AppHandle, Manager};
 
-const KEYRING_SERVICE: &str = "com.caseybackes.family-finance";
+#[cfg(feature = "sandbox-dev")]
+const KEYRING_SERVICE: &str = "com.caseybackes.moneymap.dev";
+#[cfg(not(feature = "sandbox-dev"))]
+const KEYRING_SERVICE: &str = "com.caseybackes.moneymap";
 const KEYRING_ACCOUNT: &str = "database-key-v2";
+#[cfg(feature = "sandbox-dev")]
 const SANDBOX_BROKER_URL: &str = "https://family-finance-broker.cloud-admin-f91.workers.dev/v1/sandbox/demo-transactions";
+#[cfg(feature = "sandbox-dev")]
 const SANDBOX_BROKER_BASE_URL: &str = "https://family-finance-broker.cloud-admin-f91.workers.dev/v1/sandbox";
 
 #[derive(Serialize)]
@@ -20,6 +26,10 @@ struct DatabaseStatus {
     encrypted: bool,
     schema_version: u32,
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppCapabilities { sandbox_enabled: bool }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +90,7 @@ struct RecurringSuggestion { account_id: String, account_name: String, descripti
 #[serde(rename_all = "camelCase")]
 struct PlaidConnectionInfo { id: String, institution_name: String, environment: String, account_count: i64 }
 
+#[cfg(feature = "sandbox-dev")]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SandboxLinkSession {
@@ -89,6 +100,7 @@ struct SandboxLinkSession {
     expiration: String,
 }
 
+#[cfg(feature = "sandbox-dev")]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompleteSandboxLinkInput {
@@ -677,6 +689,7 @@ fn skip_schedule_occurrence(app: AppHandle, schedule_id: String) -> Result<Strin
     process_schedule(app, schedule_id, false)
 }
 
+#[cfg(feature = "sandbox-dev")]
 fn broker_post(path: &str, body: Value, connection_secret: Option<&str>) -> Result<Value, String> {
     let client = reqwest::blocking::Client::new();
     let mut request = client.post(format!("{SANDBOX_BROKER_BASE_URL}/{path}")).json(&body);
@@ -690,6 +703,7 @@ fn broker_post(path: &str, body: Value, connection_secret: Option<&str>) -> Resu
     response.json().map_err(|error| format!("Sandbox broker response was invalid: {error}"))
 }
 
+#[cfg(feature = "sandbox-dev")]
 fn broker_post_empty(path: &str, connection_secret: &str) -> Result<(), String> {
     let response = reqwest::blocking::Client::new().post(format!("{SANDBOX_BROKER_BASE_URL}/{path}"))
         .header("x-family-finance-connection-key", connection_secret)
@@ -698,10 +712,12 @@ fn broker_post_empty(path: &str, connection_secret: &str) -> Result<(), String> 
     Ok(())
 }
 
+#[cfg(feature = "sandbox-dev")]
 fn cents(value: &Value) -> Option<i64> {
     value.as_f64().map(|amount| (amount * 100.0).round() as i64)
 }
 
+#[cfg(feature = "sandbox-dev")]
 fn apply_plaid_sync(app: &AppHandle, local_connection_id: &str, payload: &Value) -> Result<usize, String> {
     let (mut connection, _) = open_database(app)?;
     let institution = payload["connection"]["institutionName"].as_str().unwrap_or("Plaid Sandbox institution");
@@ -804,6 +820,7 @@ fn apply_plaid_sync(app: &AppHandle, local_connection_id: &str, payload: &Value)
     Ok(imported)
 }
 
+#[cfg(feature = "sandbox-dev")]
 #[tauri::command]
 async fn create_plaid_sandbox_link_session() -> Result<SandboxLinkSession, String> {
     tauri::async_runtime::spawn_blocking(|| {
@@ -817,6 +834,7 @@ async fn create_plaid_sandbox_link_session() -> Result<SandboxLinkSession, Strin
     }).await.map_err(|error| error.to_string())?
 }
 
+#[cfg(feature = "sandbox-dev")]
 #[tauri::command]
 async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkInput) -> Result<usize, String> {
     let session_id = input.session_id.clone();
@@ -847,6 +865,7 @@ async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkI
     apply_plaid_sync(&app, &local_connection_id, &payload)
 }
 
+#[cfg(feature = "sandbox-dev")]
 #[tauri::command]
 async fn sync_plaid_sandbox_connections(app: AppHandle) -> Result<usize, String> {
     let connections = {
@@ -879,6 +898,12 @@ fn plaid_connections_data(app: AppHandle) -> Result<Vec<PlaidConnectionInfo>, St
 }
 
 #[tauri::command]
+fn app_capabilities() -> AppCapabilities {
+    AppCapabilities { sandbox_enabled: cfg!(feature = "sandbox-dev") }
+}
+
+#[cfg(feature = "sandbox-dev")]
+#[tauri::command]
 async fn disconnect_plaid_sandbox_connection(app: AppHandle, connection_id: String) -> Result<(), String> {
     let local = {
         let (connection, _) = open_database(&app)?;
@@ -888,11 +913,38 @@ async fn disconnect_plaid_sandbox_connection(app: AppHandle, connection_id: Stri
     let (broker_id, secret) = local;
     tauri::async_runtime::spawn_blocking(move || broker_post_empty(&format!("connections/{broker_id}/disconnect"), &secret))
         .await.map_err(|error| error.to_string())??;
-    let (connection, _) = open_database(&app)?;
-    connection.execute("DELETE FROM plaid_connections WHERE id = ?1", [&connection_id]).map_err(|error| error.to_string())?;
+    let (mut connection, _) = open_database(&app)?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let account_ids = {
+        let mut statement = transaction.prepare(
+            "SELECT account_id FROM plaid_account_links WHERE plaid_connection_id = ?1"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement.query_map([&connection_id], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+    };
+    for account_id in &account_ids {
+        transaction.execute("DELETE FROM scheduled_transactions WHERE account_id = ?1", [account_id])
+            .map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM transactions WHERE account_id = ?1", [account_id])
+            .map_err(|error| error.to_string())?;
+    }
+    transaction.execute("DELETE FROM plaid_account_links WHERE plaid_connection_id = ?1", [&connection_id])
+        .map_err(|error| error.to_string())?;
+    for account_id in &account_ids {
+        transaction.execute(
+            "DELETE FROM accounts WHERE id = ?1 AND NOT EXISTS(SELECT 1 FROM plaid_account_links WHERE account_id = ?1)",
+            [account_id],
+        ).map_err(|error| error.to_string())?;
+    }
+    transaction.execute("DELETE FROM plaid_connections WHERE id = ?1", [&connection_id]).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
 
+#[cfg(feature = "sandbox-dev")]
 #[tauri::command]
 fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
     let payload: Value = reqwest::blocking::get(SANDBOX_BROKER_URL).map_err(|error| error.to_string())?
@@ -920,9 +972,18 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
     Ok(imported)
 }
 
+#[cfg(feature = "sandbox-dev")]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections, plaid_connections_data, disconnect_plaid_sandbox_connection])
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections, plaid_connections_data, disconnect_plaid_sandbox_connection])
         .run(tauri::generate_context!())
-        .expect("error while running Family Finance");
+        .expect("error while running Money Map Dev");
+}
+
+#[cfg(not(feature = "sandbox-dev"))]
+pub fn run() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, plaid_connections_data])
+        .run(tauri::generate_context!())
+        .expect("error while running Money Map");
 }

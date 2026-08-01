@@ -12,7 +12,9 @@ type Category = { id: string; name: string };
 type RecurringSuggestion = { accountId: string; accountName: string; description: string; amountCents: number; recurrence: string; nextOccurrence: string; occurrences: number };
 type CalendarItem = { id: string; description: string; amountCents: number; scheduled?: boolean };
 type ConnectedInstitution = { id: string; institutionName: string; environment: string; accountCount: number };
+type AppCapabilities = { sandboxEnabled: boolean };
 type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts" | "scenarios" | "categories";
+type PendingDisconnect = { connection: ConnectedInstitution; confirming: boolean };
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const formatMoney = (cents: number) => money.format(cents / 100);
@@ -67,6 +69,8 @@ export function App() {
   const [syncingAccounts, setSyncingAccounts] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [connections, setConnections] = useState<ConnectedInstitution[]>([]);
+  const [sandboxEnabled, setSandboxEnabled] = useState(false);
+  const [pendingDisconnect, setPendingDisconnect] = useState<PendingDisconnect | null>(null);
   const [rangeMonths, setRangeMonths] = useState<number | null>(1);
   const [startupSyncing, setStartupSyncing] = useState(true);
   const [startupSyncMessage, setStartupSyncMessage] = useState("Opening local finance profile…");
@@ -85,12 +89,12 @@ export function App() {
     void (async () => {
       const epoch = storeEpoch.current;
       try {
-        const [initialDashboard, initialCategories, initialConnections, initialSchedules] = await Promise.all([
-          invoke<DashboardData>("dashboard_data"), invoke<Category[]>("categories_data"), invoke<ConnectedInstitution[]>("plaid_connections_data"), invoke<Schedule[]>("scheduled_data")
+        const [initialDashboard, initialCategories, initialConnections, initialSchedules, capabilities] = await Promise.all([
+          invoke<DashboardData>("dashboard_data"), invoke<Category[]>("categories_data"), invoke<ConnectedInstitution[]>("plaid_connections_data"), invoke<Schedule[]>("scheduled_data"), invoke<AppCapabilities>("app_capabilities")
         ]);
         if (cancelled || epoch !== storeEpoch.current) return;
-        setDashboard(initialDashboard); setCategories(initialCategories); setConnections(initialConnections); setSchedules(initialSchedules); setError(null);
-        if (initialConnections.length === 0) { setStartupSyncMessage("Local profile ready."); return; }
+        setDashboard(initialDashboard); setCategories(initialCategories); setConnections(initialConnections); setSchedules(initialSchedules); setSandboxEnabled(capabilities.sandboxEnabled); setError(null);
+        if (!capabilities.sandboxEnabled || initialConnections.length === 0) { setStartupSyncMessage("Local profile ready."); return; }
         setStartupSyncMessage(`Refreshing ${initialConnections.length} connected Sandbox ${initialConnections.length === 1 ? "institution" : "institutions"}…`);
         try {
           await invoke<number>("sync_plaid_sandbox_connections");
@@ -119,7 +123,21 @@ export function App() {
   const periodLabel = rangeMonths === null ? "All activity" : rangeMonths === 1 ? "Last month" : rangeMonths === 12 ? "Last year" : `Last ${rangeMonths} months`;
   async function addSuggestedSchedule(item: RecurringSuggestion) { await invoke("create_schedule", { input: { accountId: item.accountId, startDate: item.nextOccurrence, description: item.description, amountCents: item.amountCents, recurrence: item.recurrence } }); setSuggestions(current => current.filter(candidate => !(candidate.accountId === item.accountId && candidate.description === item.description && candidate.amountCents === item.amountCents))); }
   async function syncConnectedAccounts() { setSyncingAccounts(true); setError(null); setSyncMessage(null); try { const changed = await invoke<number>("sync_plaid_sandbox_connections"); setSyncMessage(changed === 0 ? "Up to date." : `Synced ${changed} transaction change${changed === 1 ? "" : "s"}.`); refresh(); if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
-  async function disconnectConnectedAccount(connection: ConnectedInstitution) { if (!confirm(`Disconnect ${connection.institutionName}? Local history will be kept, but future sync will stop.`)) return; setSyncingAccounts(true); try { await invoke("disconnect_plaid_sandbox_connection", { connectionId: connection.id }); setConnections(current => current.filter(item => item.id !== connection.id)); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
+  async function disconnectConnectedAccount(connection: ConnectedInstitution) { setPendingDisconnect({ connection, confirming: false }); }
+  async function confirmDisconnect() {
+    const pending = pendingDisconnect;
+    if (!pending) return;
+    setPendingDisconnect({ ...pending, confirming: true }); setSyncingAccounts(true);
+    try {
+      await invoke("disconnect_plaid_sandbox_connection", { connectionId: pending.connection.id });
+      setConnections(current => current.filter(item => item.id !== pending.connection.id));
+      refresh();
+      void invoke<LedgerData>("ledger_data").then(setLedger);
+      void invoke<Schedule[]>("scheduled_data").then(setSchedules);
+      setPendingDisconnect(null);
+    } catch (reason) { setError(String(reason)); setPendingDisconnect(null); }
+    finally { setSyncingAccounts(false); }
+  }
   async function recoverLocalStore() {
     if (!confirm("Start a fresh encrypted local store? The unreadable file will be preserved in the app data folder, but it cannot be used without its original encryption key.")) return;
     setRecoveringStore(true);
@@ -162,7 +180,7 @@ export function App() {
         <Widget title="Accounts & cards" className="accounts-widget">
           <div className="account-grid">
             {dashboard.accounts.map((account) => <article className="account-card" key={account.id}><small>{account.plaidSubtype ?? account.accountType}{account.plaidMask ? ` · •••• ${account.plaidMask}` : ""}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong>{account.plaidAvailableBalanceCents !== null && account.plaidAvailableBalanceCents !== undefined ? <em>Available {formatMoney(account.plaidAvailableBalanceCents)}</em> : null}</article>)}
-            <SandboxLinkButton onImported={refresh} />
+            {sandboxEnabled ? <SandboxLinkButton onImported={refresh} /> : null}
           </div>
         </Widget>
         <Widget title="Recent transactions" className="recent-widget">
@@ -176,15 +194,20 @@ export function App() {
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onEdit={(entry) => { setEditingTransaction(entry); setDialog("transaction"); }} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} schedules={schedules} onMonthChange={setCalendarMonth} /> : null}
       {view === "scheduled" ? <Scheduled schedules={schedules} onEdit={(schedule) => { setEditingSchedule(schedule); setDialog("schedule"); }} onChanged={() => { refresh(); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
-      {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} connections={connections} syncMessage={syncMessage} onAdd={() => setDialog("account")} onAdjust={(account) => { setAdjustingAccount(account); setDialog("adjustment"); }} onSync={() => void syncConnectedAccounts()} onDisconnect={(connection) => void disconnectConnectedAccount(connection)} syncing={syncingAccounts} /> : null}
+      {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} connections={connections} sandboxEnabled={sandboxEnabled} syncMessage={syncMessage} onAdd={() => setDialog("account")} onAdjust={(account) => { setAdjustingAccount(account); setDialog("adjustment"); }} onSync={() => void syncConnectedAccounts()} onDisconnect={(connection) => void disconnectConnectedAccount(connection)} syncing={syncingAccounts} /> : null}
       {view === "scenarios" ? <ScenarioModel netWorth={netWorth} incomeCents={dashboard?.incomeCents ?? 0} spendingCents={dashboard?.spendingCents ?? 0} /> : null}
       {view === "categories" ? <CategoryManager categories={categories} onCreated={() => void invoke<Category[]>("categories_data").then(setCategories)} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
       {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} categories={categories} entry={editingTransaction} onClose={() => { setDialog(null); setEditingTransaction(null); }} onSaved={() => { setDialog(null); setEditingTransaction(null); refresh(); if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {dialog === "schedule" ? <ScheduleDialog accounts={dashboard?.accounts ?? []} schedule={editingSchedule} onClose={() => { setDialog(null); setEditingSchedule(null); }} onSaved={() => { setDialog(null); setEditingSchedule(null); setView("scheduled"); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
       {dialog === "adjustment" && adjustingAccount ? <BalanceAdjustmentDialog account={adjustingAccount} onClose={() => { setDialog(null); setAdjustingAccount(null); }} onSaved={() => { setDialog(null); setAdjustingAccount(null); refresh(); if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
+      {pendingDisconnect ? <ConfirmationDialog title={`Disconnect ${pendingDisconnect.connection.institutionName}?`} confirmLabel="Disconnect and delete" busy={pendingDisconnect.confirming} onCancel={() => setPendingDisconnect(null)} onConfirm={() => void confirmDisconnect()}><p>This removes this institution's Plaid connection and deletes every linked account, imported transaction, manual transaction, balance adjustment, and scheduled transaction from this Money Map profile.</p><p>Reconnecting later pulls a fresh copy from Plaid.</p></ConfirmationDialog> : null}
     </section>
   </main>;
+}
+
+function ConfirmationDialog({ title, children, confirmLabel, busy, onCancel, onConfirm }: { title: string; children: React.ReactNode; confirmLabel: string; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+  return <div className="dialog-backdrop" role="presentation"><section className="dialog confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirmation-title"><header><h2 id="confirmation-title">{title}</h2><button aria-label="Cancel" disabled={busy} onClick={onCancel}>×</button></header><div className="confirmation-copy">{children}</div><footer><button disabled={busy} onClick={onCancel}>Cancel</button><button className="primary-action destructive-action" disabled={busy} onClick={onConfirm}>{busy ? "Disconnecting…" : confirmLabel}</button></footer></section></div>;
 }
 
 function Ledger({ transactions, onEdit, onDeleted }: { transactions: LedgerEntry[]; onEdit: (entry: LedgerEntry) => void; onDeleted: () => void }) {
@@ -217,7 +240,7 @@ function Scheduled({ schedules, onEdit, onChanged }: { schedules: Schedule[]; on
   return <section className="ledger-widget scheduled-widget"><div className="ledger-head"><span>Next occurrence</span><span>Description</span><span>Account</span><span>Amount & actions</span></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.nextOccurrence}<small>{item.recurrence} · starts {item.startDate}{item.endDate ? ` · ends ${item.endDate}` : ""}</small></span><strong>{item.description}</strong><span>{item.accountName}</span><span className="schedule-actions"><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong><div><button onClick={() => onEdit(item)}>Edit</button><button disabled={processing !== null} onClick={() => void process(item, "skip")}>{processing === `skip:${item.id}` ? "Skipping…" : "Skip"}</button><button className="primary-action" disabled={processing !== null} onClick={() => void process(item, "record")}>{processing === `record:${item.id}` ? "Recording…" : "Record"}</button></div>{status[item.id] ? <small className="schedule-status">{status[item.id]}</small> : null}</span></div>)}</section>;
 }
 
-function Accounts({ accounts, connections, syncMessage, onAdd, onAdjust, onSync, onDisconnect, syncing }: { accounts: Account[]; connections: ConnectedInstitution[]; syncMessage: string | null; onAdd: () => void; onAdjust: (account: Account) => void; onSync: () => void; onDisconnect: (connection: ConnectedInstitution) => void; syncing: boolean }) { return <section className="ledger-widget accounts-page"><div className="accounts-toolbar"><span><p className="empty-copy">Connected Sandbox accounts can be refreshed without going through Link again.</p>{syncMessage ? <small className="sync-message">{syncMessage}</small> : null}</span><button className="primary-action" disabled={syncing || connections.length === 0} onClick={onSync}>{syncing ? "Syncing accounts…" : "Sync connected accounts"}</button></div>{connections.length > 0 ? <div className="connected-institutions">{connections.map(connection => <div key={connection.id}><span><strong>{connection.institutionName}</strong><small>{connection.accountCount} linked account{connection.accountCount === 1 ? "" : "s"} · {connection.environment}</small></span><button disabled={syncing} onClick={() => onDisconnect(connection)}>Disconnect</button></div>)}</div> : null}<div className="account-grid">{accounts.map(account => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong><button className="account-adjust" onClick={() => onAdjust(account)}>Update balance</button></article>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Manual account or balance tracking</small></button><SandboxLinkButton onImported={() => window.location.reload()} /></div></section>; }
+function Accounts({ accounts, connections, sandboxEnabled, syncMessage, onAdd, onAdjust, onSync, onDisconnect, syncing }: { accounts: Account[]; connections: ConnectedInstitution[]; sandboxEnabled: boolean; syncMessage: string | null; onAdd: () => void; onAdjust: (account: Account) => void; onSync: () => void; onDisconnect: (connection: ConnectedInstitution) => void; syncing: boolean }) { return <section className="ledger-widget accounts-page">{sandboxEnabled ? <><div className="accounts-toolbar"><span><p className="empty-copy">Connected Sandbox accounts can be refreshed without going through Link again.</p>{syncMessage ? <small className="sync-message">{syncMessage}</small> : null}</span><button className="primary-action" disabled={syncing || connections.length === 0} onClick={onSync}>{syncing ? "Syncing accounts…" : "Sync connected accounts"}</button></div>{connections.length > 0 ? <div className="connected-institutions">{connections.map(connection => <div key={connection.id}><span><strong>{connection.institutionName}</strong><small>{connection.accountCount} linked account{connection.accountCount === 1 ? "" : "s"} · {connection.environment}</small></span><button disabled={syncing} onClick={() => onDisconnect(connection)}>Disconnect</button></div>)}</div> : null}</> : null}<div className="account-grid">{accounts.map(account => <article className="account-card" key={account.id}><small>{account.accountType}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong><button className="account-adjust" onClick={() => onAdjust(account)}>Update balance</button></article>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Manual account or balance tracking</small></button>{sandboxEnabled ? <SandboxLinkButton onImported={() => window.location.reload()} /> : null}</div></section>; }
 
 function CategoryManager({ categories, onCreated }: { categories: Category[]; onCreated: () => void }) {
   const [name, setName] = useState(""); const [error, setError] = useState<string | null>(null);

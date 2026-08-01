@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Money Map Dev",
+  "identifier": "com.caseybackes.moneymap.dev",
+  "app": {
+    "windows": [
+      {
+        "title": "Money Map Dev - Sandbox",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 1100,
+        "minHeight": 700
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.plaid.com/link/v2/stable/link-initialize.js; style-src 'self' 'unsafe-inline'; frame-src https://cdn.plaid.com; img-src 'self' data: https://cdn.plaid.com; connect-src 'self' https://family-finance-broker.cloud-admin-f91.workers.dev https://sandbox.plaid.com"
+    }
+  }
+}

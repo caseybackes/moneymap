@@ -5,6 +5,10 @@ description = "Local-first household finance desktop application"
 authors = ["Casey Backes"]
 edition = "2021"
 
+[features]
+default = []
+sandbox-dev = []
+
 [lib]
 name = "family_finance_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]

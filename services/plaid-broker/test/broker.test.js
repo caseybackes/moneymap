@@ -7,7 +7,7 @@ test("health is public and non-cacheable", async () => {
 
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await response.json(), { service: "family-finance-broker", status: "ok" });
+  assert.deepEqual(await response.json(), { service: "money-map-broker-dev", status: "ok" });
 });
 
 test("public project and privacy pages are available", async () => {
@@ -15,7 +15,7 @@ test("public project and privacy pages are available", async () => {
   const privacy = await worker.fetch(new Request("https://broker.example/privacy"), {});
 
   assert.equal(home.status, 200);
-  assert.match(await home.text(), /Family Finance/);
+  assert.match(await home.text(), /Money Map Dev/);
   assert.equal(privacy.status, 200);
   assert.match(await privacy.text(), /Plaid Link/);
 });
@@ -28,10 +28,17 @@ test("broker routes remain unavailable before configuration", async () => {
 });
 
 test("Sandbox Link token route remains closed until all Plaid secrets are configured", async () => {
-  const response = await worker.fetch(new Request("https://broker.example/v1/sandbox/link-token", { method: "POST" }), {});
+  const response = await worker.fetch(new Request("https://broker.example/v1/sandbox/link-token", { method: "POST" }), { APP_ENVIRONMENT: "sandbox" });
 
   assert.equal(response.status, 503);
   assert.equal((await response.json()).error.code, "plaid_not_configured");
+});
+
+test("Sandbox endpoints stay unavailable in a production deployment", async () => {
+  const response = await worker.fetch(new Request("https://broker.example/v1/sandbox/link-token", { method: "POST" }), { APP_ENVIRONMENT: "production" });
+
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error.code, "sandbox_unavailable");
 });
 
 test("broker routes require the configured bearer token", async () => {

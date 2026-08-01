@@ -135,20 +135,24 @@ async function authorizeSandboxConnection(request, connection) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const sandboxRoute = url.pathname.startsWith("/v1/sandbox/");
+    if (sandboxRoute && env.APP_ENVIRONMENT !== "sandbox") {
+      return problem(404, "sandbox_unavailable", "Sandbox routes are unavailable in this environment.");
+    }
 
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({ service: "family-finance-broker", status: "ok" });
+      return json({ service: "money-map-broker-dev", status: "ok" });
     }
 
     if (request.method === "GET" && url.pathname === "/") {
-      return page("Family Finance", `<h1>Family Finance</h1>
-        <p>Family Finance is a private desktop budgeting application for a household. This service securely supports optional financial-account connections.</p>
+      return page("Money Map Dev", `<h1>Money Map Dev</h1>
+        <p>Money Map Dev is a private desktop budgeting application for individual financial tracking. This Sandbox service supports development-only account connections.</p>
         <p><a href="/privacy">Privacy</a> · <a href="mailto:cloud-admin@caseybackes.com">Contact</a></p>`);
     }
 
     if (request.method === "GET" && url.pathname === "/privacy") {
-      return page("Family Finance privacy", `<h1>Privacy</h1>
-        <p>Family Finance is a private household budgeting application. Financial-account connection credentials are entered only through Plaid Link and are not received or stored by Family Finance.</p>
+      return page("Money Map Dev privacy", `<h1>Privacy</h1>
+        <p>Money Map is a private local-first budgeting application. Financial-account connection credentials are entered only through Plaid Link and are not received or stored by Money Map.</p>
         <p>When a connection is enabled, this service stores an encrypted Plaid access token and the minimum connection metadata needed to import account and transaction data. The desktop application stores the imported budgeting data locally on the user's device.</p>
         <p>Connection data is used only to provide account synchronization for the connected household. It is not sold or used for advertising. Disconnecting an institution removes its stored Plaid access token and ends further synchronization.</p>
         <p>Questions: <a href="mailto:cloud-admin@caseybackes.com">cloud-admin@caseybackes.com</a>.</p>`);
@@ -190,7 +194,7 @@ export default {
         await env.BROKER_DB.prepare(`INSERT INTO sandbox_link_sessions(id, secret_hash, expires_at)
           VALUES (?, ?, unixepoch() + 14400)`).bind(sessionId, await secretHash(sessionSecret)).run();
         const result = await plaidPost(env, "/link/token/create", {
-          client_name: "Family Finance Sandbox",
+          client_name: "Money Map Dev Sandbox",
           language: "en",
           country_codes: ["US"],
           products: ["transactions"],

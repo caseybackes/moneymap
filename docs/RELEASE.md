@@ -1,54 +1,39 @@
-# Family Finance — Release Operations
+# Money Map - Release Operations
 
-## Scope
+## Versioning
 
-These commands produce self-contained, single-file executable artifacts. They do not create an installer, upload a release, or change user financial data.
+Money Map uses semantic versioning: `MAJOR.MINOR.PATCH`.
 
-## Windows distribution artifact
+- **MAJOR**: an incompatible persisted-data, public API, or core-workflow change.
+- **MINOR**: backward-compatible functionality.
+- **PATCH**: backward-compatible fixes and visual corrections.
 
-From the repository root on Windows:
+`0.1.0` is the current pre-1.0 baseline. The release version must match these three files:
 
-```powershell
-.\scripts\publish-windows.ps1
-```
+- `apps/desktop/package.json`
+- `apps/desktop/src-tauri/tauri.conf.json`
+- `apps/desktop/src-tauri/Cargo.toml`
 
-This targets `win-x64` and writes `FamilyFinance.exe` to `artifacts\windows\win-x64`. The executable is self-contained and does not require a separately installed .NET runtime for an end user.
+The Tauri value is compiled into the executable and is the authoritative runtime version exposed to the application. A future Settings/About view will display it alongside build channel, source revision, build time, and dependency provenance.
 
-The publish script uses a fixed output directory and does not delete it. For a formal distribution build, run it in a fresh or versioned workspace so the artifact directory contains only the intended release output.
+## Build channels
 
-The publish scripts set `DebugSymbols=false` and `DebugType=None`. A reused fixed output directory can still contain a `.pdb` left by an earlier run, so verify the directory is fresh or inspect it before distributing an artifact.
+| Channel | Command | Output | Data identity |
+| --- | --- | --- | --- |
+| Development / Sandbox | `.\\scripts\\publish-tauri-dev.ps1` | `artifacts\\windows\\dev\\MoneyMapDev.exe` | `com.caseybackes.moneymap.dev` |
+| Production | `.\\scripts\\publish-tauri-prod.ps1` | `artifacts\\windows\\release\\MoneyMap.exe` | `com.caseybackes.moneymap` |
 
-Verified release hygiene — 2026-07-31: after inspection, stale generated `libHarfBuzzSharp.pdb` and `libSkiaSharp.pdb` files were removed from the canonical Windows artifact directory. `artifacts\windows\win-x64` now contains only `FamilyFinance.exe` (103,944,846 bytes).
+The development executable includes only Sandbox account-connection handlers. The production executable excludes those handlers.
 
-## Development build
+## GitHub release policy
 
-For a normal local Debug build, run:
+Generated executables, PDBs, local databases, and credentials do not go in Git. Each public application build should be attached to a GitHub Release tagged as `vMAJOR.MINOR.PATCH`, after clean-build and smoke-test evidence is recorded.
 
-```powershell
-.\scripts\build-dev.ps1
-```
+## Release checklist
 
-This produces the framework-dependent development executable at `src\FamilyFinance.App\bin\Debug\net10.0\FamilyFinance.exe`. It is not the distribution artifact.
-
-## Linux build artifact
-
-From the repository root on a machine with PowerShell and the required .NET SDK:
-
-```powershell
-.\scripts\publish-linux.ps1
-```
-
-This targets `linux-x64` and writes a self-contained artifact to `artifacts\linux\linux-x64`. A successful publish establishes Linux build viability. It does not establish Linux runtime support until the artifact is launched successfully on a Linux host.
-
-## Verified state — 2026-07-31
-
-- The original Windows self-contained artifact crashed with a missing native SQLite `e_sqlite3` library. It is not valid release evidence.
-- The corrected Windows `win-x64` artifact includes `e_sqlite3.dll` and passed a five-second launch check with no matching .NET Runtime error.
-- The corrected Linux `linux-x64` artifact includes `libe_sqlite3.so` and published successfully on the Windows build host.
-- The canonical Windows `artifacts\windows\win-x64\FamilyFinance.exe` was republished after daily recurrence verification and passed a five-second launch check; serialized Release tests pass 55/55.
-- Temporary `win-x64-next*` verification directories were removed. The canonical Windows release location is `artifacts\windows\win-x64`; the analogous Linux location is `artifacts\linux\linux-x64`.
-- Ledger-deletion verification republished the canonical Windows artifact in place; it passed a five-second launch check and serialized Release tests pass 59/59.
-- Financial-workflow UI refinement verification republished the canonical Windows artifact in place; it passed a five-second launch check and serialized Release tests pass 63/63.
-- Ledger-filtering verification republished the canonical Windows artifact in place; it passed a five-second launch check and serialized Release tests pass 64/64.
-- Linux runtime smoke testing remains pending a Linux environment.
-- Clean-profile `LocalApplicationData` database initialization is not yet verified; the temporary `LOCALAPPDATA` override used for the attempted check was not honored by .NET.
+1. Update all three version declarations together.
+2. Build the intended channel into its fixed artifact directory.
+3. Launch the executable from that artifact directory and verify the version/build channel.
+4. Check `git status`, confirm artifacts, databases, and credentials are excluded, then commit source and documentation.
+5. Create and push an annotated tag `vMAJOR.MINOR.PATCH`.
+6. Create the corresponding GitHub Release and upload the verified executable and checksum file.
