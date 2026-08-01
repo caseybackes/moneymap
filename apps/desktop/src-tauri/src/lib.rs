@@ -2,6 +2,8 @@ use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use keyring::Entry;
 use rand::RngCore;
 use rusqlite::{Connection, OptionalExtension};
+#[cfg(feature = "sandbox-dev")]
+use rusqlite::TransactionBehavior;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "sandbox-dev")]
 use serde_json::Value;
@@ -109,6 +111,7 @@ struct CompleteSandboxLinkInput {
     public_token: String,
     institution_id: Option<String>,
     institution_name: Option<String>,
+    selected_account_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -146,15 +149,6 @@ struct UpdateTransactionInput {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CategoryEntry { id: String, name: String }
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AdjustAccountBalanceInput {
-    account_id: String,
-    target_balance_cents: i64,
-    transaction_date: String,
-    notes: Option<String>,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -219,6 +213,7 @@ fn open_database_inner(app: &AppHandle) -> Result<(Connection, String), String> 
     let path = database_path(app)?;
     let key = database_key(path.exists())?;
     let connection = Connection::open(&path).map_err(|error| error.to_string())?;
+    connection.busy_timeout(std::time::Duration::from_secs(5)).map_err(|error| error.to_string())?;
     connection.pragma_update(None, "key", &key).map_err(|error| error.to_string())?;
     connection.execute_batch(
         "PRAGMA cipher_memory_security = ON;
@@ -351,6 +346,21 @@ fn open_database_inner(app: &AppHandle) -> Result<(Connection, String), String> 
             .map_err(|error| error.to_string())?;
     }
     connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (6)", [])
+        .map_err(|error| error.to_string())?;
+    let has_connection_identity: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('plaid_connections') WHERE name = 'institution_id')",
+        [],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !has_connection_identity {
+        connection.execute_batch(
+            "ALTER TABLE plaid_connections ADD COLUMN institution_id TEXT;
+             ALTER TABLE plaid_connections ADD COLUMN selected_account_fingerprint TEXT;
+             CREATE UNIQUE INDEX IF NOT EXISTS plaid_connections_selected_identity
+               ON plaid_connections(environment, institution_id, selected_account_fingerprint);"
+        ).map_err(|error| error.to_string())?;
+    }
+    connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)", [])
         .map_err(|error| error.to_string())?;
     Ok((connection, path.display().to_string()))
 }
@@ -510,35 +520,6 @@ fn update_transaction(app: AppHandle, input: UpdateTransactionInput) -> Result<(
 }
 
 #[tauri::command]
-fn adjust_account_balance(app: AppHandle, input: AdjustAccountBalanceInput) -> Result<i64, String> {
-    if !input.transaction_date.chars().all(|character| character.is_ascii_digit() || character == '-') || input.transaction_date.len() != 10 {
-        return Err("Adjustment date must use YYYY-MM-DD.".into());
-    }
-    let (connection, _) = open_database(&app)?;
-    let account: Option<(String, Option<i64>, i64)> = connection.query_row(
-        "SELECT a.name, a.reported_balance_cents, a.opening_balance_cents + COALESCE((SELECT SUM(t.amount_cents) FROM transactions t WHERE t.account_id = a.id), 0) FROM accounts a WHERE a.id = ?1",
-        [&input.account_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-    ).optional().map_err(|error| error.to_string())?;
-    let Some((account_name, reported_balance, calculated_balance)) = account else { return Err("Account no longer exists.".into()); };
-    let current_balance = reported_balance.unwrap_or(calculated_balance);
-    let adjustment = input.target_balance_cents - current_balance;
-    let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
-    if adjustment != 0 {
-        transaction.execute(
-            "INSERT INTO transactions(id, account_id, transaction_date, description, amount_cents, source, notes) VALUES(?1, ?2, ?3, ?4, ?5, 'adjustment', ?6)",
-            (new_id(), &input.account_id, &input.transaction_date, format!("Balance adjustment · {account_name}"), adjustment, input.notes),
-        ).map_err(|error| error.to_string())?;
-    }
-    if reported_balance.is_some() {
-        transaction.execute("UPDATE accounts SET reported_balance_cents = ?1 WHERE id = ?2", (input.target_balance_cents, &input.account_id))
-            .map_err(|error| error.to_string())?;
-    }
-    transaction.commit().map_err(|error| error.to_string())?;
-    Ok(adjustment)
-}
-
-#[tauri::command]
 fn ledger_data(app: AppHandle) -> Result<LedgerData, String> {
     let (connection, _) = open_database(&app)?;
     let mut statement = connection.prepare(
@@ -581,7 +562,7 @@ fn recurring_suggestions(app: AppHandle) -> Result<Vec<RecurringSuggestion>, Str
         "WITH ordered AS (
            SELECT t.account_id, t.description, t.amount_cents, t.transaction_date, julianday(t.transaction_date) AS day_number,
              LAG(julianday(t.transaction_date)) OVER (PARTITION BY t.account_id, lower(t.description), t.amount_cents ORDER BY t.transaction_date) AS previous_day
-           FROM transactions t WHERE t.source NOT IN ('scheduled', 'adjustment')
+           FROM transactions t WHERE t.source <> 'scheduled'
          ), grouped AS (
            SELECT account_id, description, amount_cents, MAX(transaction_date) AS last_date, COUNT(*) AS occurrences,
              AVG(CASE WHEN previous_day IS NOT NULL THEN day_number - previous_day END) AS average_days
@@ -718,10 +699,43 @@ fn cents(value: &Value) -> Option<i64> {
 }
 
 #[cfg(feature = "sandbox-dev")]
+fn selected_account_fingerprint(account_ids: &[String]) -> Option<String> {
+    let mut ids: Vec<&str> = account_ids.iter().map(String::as_str).filter(|id| !id.trim().is_empty()).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    (!ids.is_empty()).then(|| ids.join("|"))
+}
+
+#[cfg(feature = "sandbox-dev")]
+fn existing_selected_connection(
+    connection: &Connection,
+    institution_id: Option<&str>,
+    selected_fingerprint: Option<&str>,
+) -> Result<Option<String>, String> {
+    let (Some(institution_id), Some(selected_fingerprint)) = (institution_id, selected_fingerprint) else { return Ok(None); };
+    if institution_id.trim().is_empty() { return Ok(None); }
+    connection.query_row(
+        "SELECT id FROM plaid_connections
+         WHERE environment = 'sandbox' AND institution_id = ?1 AND selected_account_fingerprint = ?2
+         LIMIT 1",
+        (institution_id, selected_fingerprint),
+        |row| row.get(0),
+    ).optional().map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "sandbox-dev")]
 fn apply_plaid_sync(app: &AppHandle, local_connection_id: &str, payload: &Value) -> Result<usize, String> {
     let (mut connection, _) = open_database(app)?;
+    apply_plaid_sync_connection(&mut connection, local_connection_id, payload)
+}
+
+#[cfg(feature = "sandbox-dev")]
+fn apply_plaid_sync_connection(connection: &mut Connection, local_connection_id: &str, payload: &Value) -> Result<usize, String> {
     let institution = payload["connection"]["institutionName"].as_str().unwrap_or("Plaid Sandbox institution");
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    // Sync can be triggered by startup and a user action at nearly the same time.
+    // Taking the write lock before reading account links makes the whole import
+    // atomic; the second caller waits rather than creating a parallel account.
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     let mut account_ids = std::collections::HashMap::new();
     for account in payload["accounts"].as_array().ok_or("Sandbox response has no accounts.")? {
         let external_account_id = account["account_id"].as_str().ok_or("Sandbox account has no id.")?;
@@ -837,14 +851,38 @@ async fn create_plaid_sandbox_link_session() -> Result<SandboxLinkSession, Strin
 #[cfg(feature = "sandbox-dev")]
 #[tauri::command]
 async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkInput) -> Result<usize, String> {
+    let selected_fingerprint = selected_account_fingerprint(&input.selected_account_ids);
+    let existing = {
+        let (connection, _) = open_database(&app)?;
+        existing_selected_connection(&connection, input.institution_id.as_deref(), selected_fingerprint.as_deref())?
+    };
+    if let Some(local_connection_id) = existing {
+        // A second Link run selected the same local account set. Do not exchange
+        // its public token into another Item; refresh the connection already in
+        // this independent local profile instead.
+        let (broker_connection_id, connection_secret): (String, String) = {
+            let (connection, _) = open_database(&app)?;
+            connection.query_row(
+                "SELECT broker_connection_id, connection_secret FROM plaid_connections WHERE id = ?1",
+                [&local_connection_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(|error| error.to_string())?
+        };
+        let payload = tauri::async_runtime::spawn_blocking(move || {
+            broker_post(&format!("connections/{broker_connection_id}/sync"), Value::Object(Default::default()), Some(&connection_secret))
+        }).await.map_err(|error| error.to_string())??;
+        return apply_plaid_sync(&app, &local_connection_id, &payload);
+    }
     let session_id = input.session_id.clone();
     let session_secret = input.session_secret.clone();
+    let institution_id = input.institution_id.clone();
+    let institution_name_input = input.institution_name.clone();
     let broker_response = tauri::async_runtime::spawn_blocking(move || {
         broker_post("link-complete", serde_json::json!({
             "sessionId": input.session_id,
             "sessionSecret": input.session_secret,
             "publicToken": input.public_token,
-            "institution": { "institution_id": input.institution_id, "name": input.institution_name }
+            "institution": { "institution_id": institution_id, "name": institution_name_input }
         }), None)
     }).await.map_err(|error| error.to_string())??;
     let broker_connection_id = broker_response["connection"]["id"].as_str().ok_or("Sandbox broker returned no connection id.")?;
@@ -853,8 +891,10 @@ async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkI
     let (connection, _) = open_database(&app)?;
     let local_connection_id = new_id();
     connection.execute(
-        "INSERT INTO plaid_connections(id, broker_connection_id, connection_secret, institution_name, environment) VALUES(?1, ?2, ?3, ?4, 'sandbox')",
-        (&local_connection_id, broker_connection_id, connection_secret, institution_name),
+        "INSERT INTO plaid_connections(
+           id, broker_connection_id, connection_secret, institution_name, environment, institution_id, selected_account_fingerprint)
+         VALUES(?1, ?2, ?3, ?4, 'sandbox', ?5, ?6)",
+        (&local_connection_id, broker_connection_id, connection_secret, institution_name, input.institution_id.as_deref(), selected_fingerprint.as_deref()),
     ).map_err(|error| error.to_string())?;
     let _ = (session_id, session_secret); // The completion request consumes this one-time session at the broker.
     let payload = tauri::async_runtime::spawn_blocking({
@@ -914,7 +954,12 @@ async fn disconnect_plaid_sandbox_connection(app: AppHandle, connection_id: Stri
     tauri::async_runtime::spawn_blocking(move || broker_post_empty(&format!("connections/{broker_id}/disconnect"), &secret))
         .await.map_err(|error| error.to_string())??;
     let (mut connection, _) = open_database(&app)?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    remove_plaid_connection_local(&mut connection, &connection_id)
+}
+
+#[cfg(feature = "sandbox-dev")]
+fn remove_plaid_connection_local(connection: &mut Connection, connection_id: &str) -> Result<(), String> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     let account_ids = {
         let mut statement = transaction.prepare(
             "SELECT account_id FROM plaid_account_links WHERE plaid_connection_id = ?1"
@@ -975,15 +1020,243 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 #[cfg(feature = "sandbox-dev")]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections, plaid_connections_data, disconnect_plaid_sandbox_connection])
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections, plaid_connections_data, disconnect_plaid_sandbox_connection])
         .run(tauri::generate_context!())
         .expect("error while running Money Map Dev");
+}
+
+#[cfg(all(test, feature = "sandbox-dev"))]
+mod plaid_sync_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_database() -> Connection {
+        test_database_from(Connection::open_in_memory().unwrap())
+    }
+
+    fn test_database_from(connection: Connection) -> Connection {
+        connection.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE accounts (
+               id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
+               opening_balance_cents INTEGER NOT NULL DEFAULT 0, reported_balance_cents INTEGER
+             );
+             CREATE TABLE transactions (
+               id TEXT PRIMARY KEY NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id),
+               transaction_date TEXT NOT NULL, description TEXT NOT NULL, amount_cents INTEGER NOT NULL,
+               category_id TEXT, notes TEXT, source TEXT NOT NULL DEFAULT 'manual', external_transaction_id TEXT,
+               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               UNIQUE(source, external_transaction_id)
+             );
+             CREATE TABLE scheduled_transactions (
+               id TEXT PRIMARY KEY NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id),
+               start_date TEXT NOT NULL, end_date TEXT, description TEXT NOT NULL, amount_cents INTEGER NOT NULL,
+               recurrence TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, last_processed_occurrence TEXT
+             );
+             CREATE TABLE plaid_connections (
+               id TEXT PRIMARY KEY NOT NULL, broker_connection_id TEXT NOT NULL UNIQUE,
+               connection_secret TEXT NOT NULL, institution_name TEXT NOT NULL, environment TEXT NOT NULL,
+               institution_id TEXT, selected_account_fingerprint TEXT,
+               UNIQUE(environment, institution_id, selected_account_fingerprint)
+             );
+             CREATE TABLE plaid_account_links (
+               plaid_connection_id TEXT NOT NULL REFERENCES plaid_connections(id) ON DELETE CASCADE,
+               external_account_id TEXT NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id),
+               plaid_account_type TEXT, plaid_account_subtype TEXT, mask TEXT,
+               current_balance_cents INTEGER, available_balance_cents INTEGER, balance_refreshed_at TEXT,
+               PRIMARY KEY(plaid_connection_id, external_account_id)
+             );"
+        ).unwrap();
+        connection
+    }
+
+    fn add_connection(connection: &Connection, id: &str, broker_id: &str) {
+        connection.execute(
+            "INSERT INTO plaid_connections(id, broker_connection_id, connection_secret, institution_name, environment)
+             VALUES(?1, ?2, 'test-secret', 'Test Institution', 'sandbox')",
+            (id, broker_id),
+        ).unwrap();
+    }
+
+    fn add_identified_connection(connection: &Connection, id: &str, broker_id: &str, institution_id: &str, account_ids: &[&str]) {
+        let ids = account_ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>();
+        connection.execute(
+            "INSERT INTO plaid_connections(
+               id, broker_connection_id, connection_secret, institution_name, environment, institution_id, selected_account_fingerprint)
+             VALUES(?1, ?2, 'test-secret', 'Test Institution', 'sandbox', ?3, ?4)",
+            (id, broker_id, institution_id, selected_account_fingerprint(&ids).unwrap()),
+        ).unwrap();
+    }
+
+    fn fixture(institution: &str) -> Value {
+        json!({
+            "connection": { "institutionName": institution },
+            "accounts": [
+                { "account_id": "checking", "name": "Checking", "type": "depository", "subtype": "checking", "mask": "0000", "balances": { "current": 110.0, "available": 100.0 } },
+                { "account_id": "card", "name": "Card", "type": "credit", "subtype": "credit card", "mask": "1111", "balances": { "current": 500.0, "available": null } }
+            ],
+            "added": [
+                { "transaction_id": "txn-income", "account_id": "checking", "name": "Paycheck", "date": "2026-07-01", "amount": -1000.0 },
+                { "transaction_id": "txn-spend", "account_id": "card", "name": "Groceries", "date": "2026-07-02", "amount": 42.50 }
+            ],
+            "modified": [],
+            "removed": []
+        })
+    }
+
+    fn count(connection: &Connection, table: &str) -> i64 {
+        connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn repeated_sync_is_idempotent_for_one_link() {
+        let mut connection = test_database();
+        add_connection(&connection, "link-a", "broker-a");
+        let payload = fixture("Tartan Bank");
+
+        apply_plaid_sync_connection(&mut connection, "link-a", &payload).unwrap();
+        apply_plaid_sync_connection(&mut connection, "link-a", &payload).unwrap();
+
+        assert_eq!(count(&connection, "accounts"), 2);
+        assert_eq!(count(&connection, "plaid_account_links"), 2);
+        assert_eq!(count(&connection, "transactions"), 2);
+    }
+
+    #[test]
+    fn repeated_link_selection_resolves_to_the_existing_connection() {
+        let connection = test_database();
+        add_identified_connection(&connection, "link-a", "broker-a", "ins_tartan", &["checking", "card"]);
+        let selection = vec!["card".to_owned(), "checking".to_owned()];
+
+        assert_eq!(
+            existing_selected_connection(&connection, Some("ins_tartan"), selected_account_fingerprint(&selection).as_deref()).unwrap(),
+            Some("link-a".to_owned())
+        );
+        assert!(connection.execute(
+            "INSERT INTO plaid_connections(
+               id, broker_connection_id, connection_secret, institution_name, environment, institution_id, selected_account_fingerprint)
+             VALUES('link-retry', 'broker-retry', 'test-secret', 'Test Institution', 'sandbox', 'ins_tartan', 'card|checking')",
+            [],
+        ).is_err());
+        let distinct_selection = vec!["checking".to_owned()];
+        assert_eq!(
+            existing_selected_connection(&connection, Some("ins_tartan"), selected_account_fingerprint(&distinct_selection).as_deref()).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn distinct_institutions_keep_identical_sandbox_fixture_ids_separate() {
+        let mut connection = test_database();
+        add_connection(&connection, "link-tartan", "broker-tartan");
+        add_connection(&connection, "link-gingham", "broker-gingham");
+
+        apply_plaid_sync_connection(&mut connection, "link-tartan", &fixture("Tartan Bank")).unwrap();
+        apply_plaid_sync_connection(&mut connection, "link-gingham", &fixture("First Gingham Credit Union")).unwrap();
+
+        assert_eq!(count(&connection, "accounts"), 4);
+        assert_eq!(count(&connection, "plaid_account_links"), 4);
+        assert_eq!(count(&connection, "transactions"), 4);
+    }
+
+    #[test]
+    fn removed_and_unselected_transactions_do_not_survive_sync() {
+        let mut connection = test_database();
+        add_connection(&connection, "link-a", "broker-a");
+        let initial = fixture("Tartan Bank");
+        apply_plaid_sync_connection(&mut connection, "link-a", &initial).unwrap();
+
+        let selected_only = json!({
+            "connection": { "institutionName": "Tartan Bank" },
+            "accounts": [initial["accounts"][0].clone()],
+            "added": [{ "transaction_id": "unknown-account", "account_id": "not-selected", "name": "Ignore me", "date": "2026-07-03", "amount": 10.0 }],
+            "modified": [],
+            "removed": [{ "transaction_id": "txn-spend" }]
+        });
+        apply_plaid_sync_connection(&mut connection, "link-a", &selected_only).unwrap();
+
+        assert_eq!(count(&connection, "transactions"), 1);
+        let unknown: i64 = connection.query_row("SELECT COUNT(*) FROM transactions WHERE external_transaction_id = 'unknown-account'", [], |row| row.get(0)).unwrap();
+        assert_eq!(unknown, 0);
+    }
+
+    #[test]
+    fn disconnect_deletes_only_the_selected_connection_and_its_data() {
+        let mut connection = test_database();
+        add_connection(&connection, "link-tartan", "broker-tartan");
+        add_connection(&connection, "link-gingham", "broker-gingham");
+        apply_plaid_sync_connection(&mut connection, "link-tartan", &fixture("Tartan Bank")).unwrap();
+        apply_plaid_sync_connection(&mut connection, "link-gingham", &fixture("First Gingham Credit Union")).unwrap();
+        let tartan_account: String = connection.query_row(
+            "SELECT account_id FROM plaid_account_links WHERE plaid_connection_id = 'link-tartan' LIMIT 1", [], |row| row.get(0)
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO scheduled_transactions(id, account_id, start_date, description, amount_cents, recurrence) VALUES('schedule-a', ?1, '2026-08-01', 'Bill', -100, 'monthly')",
+            [&tartan_account],
+        ).unwrap();
+
+        remove_plaid_connection_local(&mut connection, "link-tartan").unwrap();
+
+        assert_eq!(count(&connection, "plaid_connections"), 1);
+        assert_eq!(count(&connection, "accounts"), 2);
+        assert_eq!(count(&connection, "transactions"), 2);
+        assert_eq!(count(&connection, "scheduled_transactions"), 0);
+    }
+
+    #[test]
+    fn malformed_sync_rolls_back_without_partial_import() {
+        let mut connection = test_database();
+        add_connection(&connection, "link-a", "broker-a");
+        apply_plaid_sync_connection(&mut connection, "link-a", &fixture("Tartan Bank")).unwrap();
+        let mut malformed = fixture("Tartan Bank");
+        malformed["added"][1]["amount"] = json!("not-a-number");
+
+        assert!(apply_plaid_sync_connection(&mut connection, "link-a", &malformed).is_err());
+        assert_eq!(count(&connection, "accounts"), 2);
+        assert_eq!(count(&connection, "transactions"), 2);
+        let groceries: i64 = connection.query_row(
+            "SELECT amount_cents FROM transactions WHERE external_transaction_id = 'txn-spend'", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(groceries, -4250);
+    }
+
+    #[test]
+    fn concurrent_sync_attempts_serialize_without_duplicate_rows() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("money-map-sync-race-{nonce}.db"));
+        let connection = test_database_from(Connection::open(&path).unwrap());
+        connection.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        add_connection(&connection, "link-a", "broker-a");
+        drop(connection);
+
+        let start = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let payload = fixture("Tartan Bank");
+        let workers = (0..2).map(|_| {
+            let path = path.clone();
+            let start = start.clone();
+            let payload = payload.clone();
+            std::thread::spawn(move || {
+                let mut connection = Connection::open(path).unwrap();
+                connection.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+                start.wait();
+                apply_plaid_sync_connection(&mut connection, "link-a", &payload)
+            })
+        }).collect::<Vec<_>>();
+        for worker in workers { worker.join().unwrap().unwrap(); }
+
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(count(&connection, "accounts"), 2);
+        assert_eq!(count(&connection, "plaid_account_links"), 2);
+        assert_eq!(count(&connection, "transactions"), 2);
+        drop(connection);
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[cfg(not(feature = "sandbox-dev"))]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, adjust_account_balance, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, plaid_connections_data])
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, plaid_connections_data])
         .run(tauri::generate_context!())
         .expect("error while running Money Map");
 }
