@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "money-map-tradestation-sim-broker",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "APP_ENVIRONMENT": "sim",
+    "TRADESTATION_REDIRECT_URI": "http://localhost:31022"
+  },
+  "d1_databases": [
+    {
+      "binding": "TRADESTATION_DB",
+      "database_name": "money-map-tradestation-sim-broker",
+      "database_id": "REPLACE_WITH_DEDICATED_SIM_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": { "enabled": true, "head_sampling_rate": 1 }
+}

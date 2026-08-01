@@ -67,7 +67,8 @@ Money Map is an installed, local-first desktop application for one person to mod
 - Sandbox Plaid Link is permitted for development. It uses an owner-controlled Plaid dashboard account, encrypted broker-side token handling, and encrypted local connection metadata. Real-bank connection remains gated on Sandbox verification, review-before-import, consent, and disconnect behavior.
 - Development and production are separate build/deployment environments. Development is Sandbox-only; production cannot contain Sandbox credentials, routes, or reset tools. They use separate Worker deployments and local application data identities.
 - Disconnecting an institution removes the linked access token and all imported account/transaction records associated with that institution from the local database. Reconnection imports a fresh current data set.
-- The implementation stack is React, Tauri/Rust, SQLCipher, and an optional Cloudflare Worker Plaid broker; the legacy Avalonia app remains the behavioral reference during migration.
+- The implementation stack is React, Tauri/Rust, SQLCipher, and optional purpose-specific Cloudflare Workers for external connection credential boundaries. Plaid covers supported bank aggregation; TradeStation is a direct, read-only brokerage connector. The legacy Avalonia app remains the behavioral reference during migration.
+- The Investment view is the portfolio home for brokerage and retirement account context. Its first direct connector is TradeStation, limited to `ReadAccount` and `MarketData` OAuth scopes; it has no order-placement capability. Principal and other supported retirement providers remain candidates for Plaid Investments after production coverage is verified.
 - Money is persisted as integer cents.
 
 ## Explicitly out of scope for the foundation

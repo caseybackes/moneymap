@@ -10,6 +10,10 @@ use serde_json::Value;
 use std::fs;
 use std::io::Write;
 use tauri::{AppHandle, Manager};
+#[cfg(feature = "sandbox-dev")]
+use std::{io::Read, net::TcpListener, process::Command, sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
+#[cfg(feature = "sandbox-dev")]
+use url::Url;
 
 #[cfg(feature = "sandbox-dev")]
 const KEYRING_SERVICE: &str = "com.caseybackes.moneymap.dev";
@@ -20,6 +24,12 @@ const KEYRING_ACCOUNT: &str = "database-key-v2";
 const SANDBOX_BROKER_URL: &str = "https://family-finance-broker.cloud-admin-f91.workers.dev/v1/sandbox/demo-transactions";
 #[cfg(feature = "sandbox-dev")]
 const SANDBOX_BROKER_BASE_URL: &str = "https://family-finance-broker.cloud-admin-f91.workers.dev/v1/sandbox";
+#[cfg(feature = "sandbox-dev")]
+const TRADESTATION_SIM_BROKER_BASE_URL: &str = "https://money-map-tradestation-sim-broker.cloud-admin-f91.workers.dev";
+#[cfg(feature = "sandbox-dev")]
+const TRADESTATION_SETUP_KEY_ACCOUNT: &str = "tradestation-broker-setup-key";
+#[cfg(feature = "sandbox-dev")]
+const TRADESTATION_CONNECTION_KEY_PREFIX: &str = "tradestation-connection-";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +42,23 @@ struct DatabaseStatus {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppCapabilities { sandbox_enabled: bool }
+
+#[cfg(feature = "sandbox-dev")]
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TradeStationConnectionStatus { status: String, message: String, connection_id: Option<String> }
+
+#[cfg(feature = "sandbox-dev")]
+#[derive(Default)]
+struct TradeStationOAuthState(Arc<Mutex<TradeStationConnectionStatusInner>>);
+
+#[cfg(feature = "sandbox-dev")]
+struct TradeStationConnectionStatusInner { status: String, message: String, connection_id: Option<String> }
+
+#[cfg(feature = "sandbox-dev")]
+impl Default for TradeStationConnectionStatusInner {
+    fn default() -> Self { Self { status: "not_connected".into(), message: "TradeStation SIM is not connected.".into(), connection_id: None } }
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -275,6 +302,15 @@ fn open_database_inner(app: &AppHandle) -> Result<(Connection, String), String> 
            available_balance_cents INTEGER,
            balance_refreshed_at TEXT,
            PRIMARY KEY(plaid_connection_id, external_account_id)
+         );
+         CREATE TABLE IF NOT EXISTS external_connections (
+           id TEXT PRIMARY KEY NOT NULL,
+           provider TEXT NOT NULL,
+           environment TEXT NOT NULL,
+           broker_connection_id TEXT NOT NULL UNIQUE,
+           status TEXT NOT NULL,
+           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
          );
          INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);"
     ).map_err(|error| error.to_string())?;
@@ -737,6 +773,7 @@ fn apply_plaid_sync_connection(connection: &mut Connection, local_connection_id:
     // atomic; the second caller waits rather than creating a parallel account.
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     let mut account_ids = std::collections::HashMap::new();
+    let balance_fetched_at = payload["balanceFetchedAt"].as_str();
     for account in payload["accounts"].as_array().ok_or("Sandbox response has no accounts.")? {
         let external_account_id = account["account_id"].as_str().ok_or("Sandbox account has no id.")?;
         let name = account["name"].as_str().unwrap_or("Plaid account");
@@ -746,6 +783,12 @@ fn apply_plaid_sync_connection(connection: &mut Connection, local_connection_id:
         let mask = account["mask"].as_str();
         let current_balance_cents = cents(&account["balances"]["current"]);
         let available_balance_cents = cents(&account["balances"]["available"]);
+        // Plaid may tell us when its cached balance was last updated. If it
+        // does not, preserve when Money Map retrieved that cached snapshot.
+        // This is deliberately not a real-time Balance API timestamp.
+        let balance_refreshed_at = account["balances"]["last_updated_datetime"]
+            .as_str()
+            .or(balance_fetched_at);
         let linked_account: Option<String> = transaction.query_row(
             "SELECT account_id FROM plaid_account_links WHERE plaid_connection_id = ?1 AND external_account_id = ?2",
             (local_connection_id, external_account_id),
@@ -778,9 +821,9 @@ fn apply_plaid_sync_connection(connection: &mut Connection, local_connection_id:
                 "INSERT INTO plaid_account_links(
                    plaid_connection_id, external_account_id, account_id, plaid_account_type, plaid_account_subtype,
                    mask, current_balance_cents, available_balance_cents, balance_refreshed_at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, CURRENT_TIMESTAMP)",
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 (local_connection_id, external_account_id, &account_id, plaid_account_type, plaid_account_subtype,
-                 mask, current_balance_cents, available_balance_cents),
+                 mask, current_balance_cents, available_balance_cents, balance_refreshed_at),
             ).map_err(|error| error.to_string())?;
         } else {
             transaction.execute(
@@ -793,10 +836,10 @@ fn apply_plaid_sync_connection(connection: &mut Connection, local_connection_id:
                 "UPDATE plaid_account_links
                  SET plaid_account_type = ?1, plaid_account_subtype = ?2, mask = ?3,
                      current_balance_cents = ?4, available_balance_cents = ?5,
-                     balance_refreshed_at = CURRENT_TIMESTAMP
-                 WHERE plaid_connection_id = ?6 AND external_account_id = ?7",
+                     balance_refreshed_at = ?6
+                 WHERE plaid_connection_id = ?7 AND external_account_id = ?8",
                 (plaid_account_type, plaid_account_subtype, mask, current_balance_cents, available_balance_cents,
-                 local_connection_id, external_account_id),
+                 balance_refreshed_at, local_connection_id, external_account_id),
             ).map_err(|error| error.to_string())?;
         }
         account_ids.insert(external_account_id.to_owned(), account_id);
@@ -943,6 +986,160 @@ fn app_capabilities() -> AppCapabilities {
 }
 
 #[cfg(feature = "sandbox-dev")]
+fn update_tradestation_status(
+    state: &TradeStationOAuthState,
+    status: impl Into<String>,
+    message: impl Into<String>,
+    connection_id: Option<String>,
+) {
+    if let Ok(mut current) = state.0.lock() {
+        current.status = status.into();
+        current.message = message.into();
+        current.connection_id = connection_id;
+    }
+}
+
+#[cfg(feature = "sandbox-dev")]
+fn tradestation_setup_key() -> Result<String, String> {
+    Entry::new(KEYRING_SERVICE, TRADESTATION_SETUP_KEY_ACCOUNT)
+        .map_err(|error| error.to_string())?
+        .get_password()
+        .map_err(|_| "Enter the TradeStation Dev broker setup key in Settings before connecting.".to_string())
+}
+
+#[cfg(feature = "sandbox-dev")]
+#[tauri::command]
+fn save_tradestation_sim_setup_key(value: String) -> Result<(), String> {
+    let value = value.trim();
+    if value.len() < 24 { return Err("The TradeStation Dev broker setup key is not valid.".into()); }
+    Entry::new(KEYRING_SERVICE, TRADESTATION_SETUP_KEY_ACCOUNT)
+        .map_err(|error| error.to_string())?
+        .set_password(value)
+        .map_err(|error| format!("Could not save the broker setup key in Windows Credential Manager: {error}"))
+}
+
+#[cfg(feature = "sandbox-dev")]
+#[tauri::command]
+fn tradestation_sim_connection_status(app: AppHandle, state: tauri::State<TradeStationOAuthState>) -> Result<TradeStationConnectionStatus, String> {
+    let current = state.0.lock().map_err(|_| "TradeStation connection state is unavailable.")?;
+    if current.status == "waiting_for_browser" || current.status == "exchanging" || current.status == "failed" {
+        return Ok(TradeStationConnectionStatus { status: current.status.clone(), message: current.message.clone(), connection_id: current.connection_id.clone() });
+    }
+    drop(current);
+    let (connection, _) = open_database(&app)?;
+    let record: Option<String> = connection.query_row(
+        "SELECT broker_connection_id FROM external_connections WHERE provider = 'tradestation' AND environment = 'sim' AND status = 'connected' ORDER BY updated_at DESC LIMIT 1",
+        [], |row| row.get(0)
+    ).optional().map_err(|error| error.to_string())?;
+    Ok(match record {
+        Some(connection_id) => TradeStationConnectionStatus { status: "connected".into(), message: "TradeStation SIM is connected. Portfolio sync is the next implementation step.".into(), connection_id: Some(connection_id) },
+        None => TradeStationConnectionStatus { status: "not_connected".into(), message: "TradeStation SIM is not connected.".into(), connection_id: None },
+    })
+}
+
+#[cfg(feature = "sandbox-dev")]
+fn open_system_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let result = Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url]).spawn();
+    #[cfg(target_os = "linux")]
+    let result = Command::new("xdg-open").arg(url).spawn();
+    result.map(|_| ()).map_err(|error| format!("Could not open your browser for TradeStation sign-in: {error}"))
+}
+
+#[cfg(feature = "sandbox-dev")]
+fn parse_callback(request: &str) -> Result<(String, String), String> {
+    let target = request.lines().next().and_then(|line| line.split_whitespace().nth(1)).ok_or("TradeStation returned an invalid local callback.")?;
+    let url = Url::parse(&format!("http://localhost{target}")).map_err(|_| "TradeStation returned an invalid callback URL.")?;
+    let code = url.query_pairs().find(|(key, _)| key == "code").map(|(_, value)| value.into_owned()).ok_or("TradeStation did not return an authorization code.")?;
+    let state = url.query_pairs().find(|(key, _)| key == "state").map(|(_, value)| value.into_owned()).ok_or("TradeStation did not return connection state.")?;
+    Ok((code, state))
+}
+
+#[cfg(feature = "sandbox-dev")]
+fn callback_page(success: bool) -> &'static str {
+    if success {
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!doctype html><title>Money Map</title><body><h2>TradeStation authorization received</h2><p>You can return to Money Map. It is securely completing the connection.</p></body>"
+    } else {
+        "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!doctype html><title>Money Map</title><body><h2>TradeStation authorization could not be read</h2><p>Return to Money Map and try again.</p></body>"
+    }
+}
+
+#[cfg(feature = "sandbox-dev")]
+#[tauri::command]
+async fn start_tradestation_sim_connection(app: AppHandle, state: tauri::State<'_, TradeStationOAuthState>) -> Result<(), String> {
+    let setup_key = tradestation_setup_key()?;
+    {
+        let current = state.0.lock().map_err(|_| "TradeStation connection state is unavailable.")?;
+        if current.status == "waiting_for_browser" || current.status == "exchanging" { return Err("TradeStation sign-in is already in progress. Complete or cancel it in your browser.".into()); }
+    }
+    update_tradestation_status(&state, "preparing", "Creating a one-time TradeStation SIM sign-in session…", None);
+    let start = tauri::async_runtime::spawn_blocking(move || -> Result<Value, String> {
+        let response = reqwest::blocking::Client::new().post(format!("{TRADESTATION_SIM_BROKER_BASE_URL}/v1/oauth/start"))
+            .header("x-money-map-setup-key", setup_key)
+            .json(&serde_json::json!({}))
+            .send().map_err(|error| format!("Could not reach the TradeStation Dev broker: {error}"))?;
+        let status = response.status();
+        let body: Value = response.json().map_err(|error| format!("TradeStation Dev broker returned invalid JSON: {error}"))?;
+        if !status.is_success() { return Err(body["error"]["message"].as_str().unwrap_or("TradeStation Dev broker rejected connection setup.").to_string()); }
+        Ok(body)
+    }).await.map_err(|error| error.to_string())??;
+    let session_id = start["sessionId"].as_str().ok_or("TradeStation Dev broker did not return a session id.")?.to_owned();
+    let connection_key = start["connectionKey"].as_str().ok_or("TradeStation Dev broker did not return a connection key.")?.to_owned();
+    let authorization_url = start["authorizationUrl"].as_str().ok_or("TradeStation Dev broker did not return an authorization URL.")?.to_owned();
+    let listener = TcpListener::bind("127.0.0.1:31022").map_err(|_| "Money Map could not reserve localhost:31022 for TradeStation sign-in. Close the application using that port and try again.")?;
+    listener.set_nonblocking(true).map_err(|error| error.to_string())?;
+    let shared = TradeStationOAuthState(state.0.clone());
+    let callback_app = app.clone();
+    thread::spawn(move || {
+        update_tradestation_status(&shared, "waiting_for_browser", "Waiting for TradeStation sign-in in your browser…", None);
+        let deadline = Instant::now() + Duration::from_secs(600);
+        loop {
+            if Instant::now() > deadline {
+                update_tradestation_status(&shared, "failed", "TradeStation sign-in timed out after ten minutes. Start again from Money Map.", None);
+                return;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut request = String::new();
+                    let _ = stream.read_to_string(&mut request);
+                    let parsed = parse_callback(&request);
+                    let _ = stream.write_all(callback_page(parsed.is_ok()).as_bytes());
+                    let Ok((code, callback_state)) = parsed else { update_tradestation_status(&shared, "failed", "TradeStation returned an invalid authorization callback.", None); return; };
+                    update_tradestation_status(&shared, "exchanging", "Securing the TradeStation SIM connection…", None);
+                    let response = reqwest::blocking::Client::new().post(format!("{TRADESTATION_SIM_BROKER_BASE_URL}/v1/oauth/exchange"))
+                        .json(&serde_json::json!({ "code": code, "state": callback_state, "sessionId": session_id, "connectionKey": connection_key }))
+                        .send();
+                    let result: Result<String, String> = (|| {
+                        let response = response.map_err(|error| format!("Could not complete TradeStation sign-in: {error}"))?;
+                        let status = response.status(); let body: Value = response.json().map_err(|error| format!("TradeStation Dev broker returned invalid JSON: {error}"))?;
+                        if !status.is_success() { return Err(body["error"]["message"].as_str().unwrap_or("TradeStation did not complete the connection.").to_string()); }
+                        body["connectionId"].as_str().map(str::to_owned).ok_or("TradeStation Dev broker did not return a connection id.".to_string())
+                    })();
+                    match result {
+                        Ok(connection_id) => {
+                            let save_result = (|| -> Result<(), String> {
+                                Entry::new(KEYRING_SERVICE, &format!("{TRADESTATION_CONNECTION_KEY_PREFIX}{connection_id}"))
+                                    .map_err(|error| error.to_string())?.set_password(&connection_key).map_err(|error| error.to_string())?;
+                                let (connection, _) = open_database(&callback_app)?;
+                                connection.execute("INSERT OR REPLACE INTO external_connections(id, provider, environment, broker_connection_id, status, updated_at) VALUES(?1, 'tradestation', 'sim', ?2, 'connected', CURRENT_TIMESTAMP)", (new_id(), &connection_id)).map_err(|error| error.to_string())?;
+                                Ok(())
+                            })();
+                            match save_result { Ok(()) => update_tradestation_status(&shared, "connected", "TradeStation SIM is connected. Portfolio sync is the next implementation step.", Some(connection_id)), Err(error) => update_tradestation_status(&shared, "failed", format!("TradeStation authorized, but Money Map could not securely save the connection: {error}"), None) }
+                        }
+                        Err(error) => update_tradestation_status(&shared, "failed", error, None),
+                    }
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(200)),
+                Err(error) => { update_tradestation_status(&shared, "failed", format!("TradeStation callback listener failed: {error}"), None); return; }
+            }
+        }
+    });
+    if let Err(error) = open_system_browser(&authorization_url) { update_tradestation_status(&state, "failed", error.clone(), None); return Err(error); }
+    Ok(())
+}
+
+#[cfg(feature = "sandbox-dev")]
 #[tauri::command]
 async fn disconnect_plaid_sandbox_connection(app: AppHandle, connection_id: String) -> Result<(), String> {
     let local = {
@@ -1020,7 +1217,8 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 #[cfg(feature = "sandbox-dev")]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections, plaid_connections_data, disconnect_plaid_sandbox_connection])
+        .manage(TradeStationOAuthState::default())
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections, plaid_connections_data, disconnect_plaid_sandbox_connection, save_tradestation_sim_setup_key, tradestation_sim_connection_status, start_tradestation_sim_connection])
         .run(tauri::generate_context!())
         .expect("error while running Money Map Dev");
 }
@@ -1091,6 +1289,8 @@ mod plaid_sync_tests {
     fn fixture(institution: &str) -> Value {
         json!({
             "connection": { "institutionName": institution },
+            "balanceSource": "cached_accounts_get",
+            "balanceFetchedAt": "2026-08-01T12:34:56Z",
             "accounts": [
                 { "account_id": "checking", "name": "Checking", "type": "depository", "subtype": "checking", "mask": "0000", "balances": { "current": 110.0, "available": 100.0 } },
                 { "account_id": "card", "name": "Card", "type": "credit", "subtype": "credit card", "mask": "1111", "balances": { "current": 500.0, "available": null } }
@@ -1120,6 +1320,12 @@ mod plaid_sync_tests {
         assert_eq!(count(&connection, "accounts"), 2);
         assert_eq!(count(&connection, "plaid_account_links"), 2);
         assert_eq!(count(&connection, "transactions"), 2);
+        let fetched_at: String = connection.query_row(
+            "SELECT balance_refreshed_at FROM plaid_account_links WHERE plaid_connection_id = 'link-a' AND external_account_id = 'checking'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(fetched_at, "2026-08-01T12:34:56Z");
     }
 
     #[test]

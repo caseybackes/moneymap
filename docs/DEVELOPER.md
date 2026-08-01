@@ -88,7 +88,7 @@ The React/Tauri dev executable is always replaced in `artifacts\windows\dev\Fami
 ## Local data and constraints
 
 - The Avalonia database remains at `%LOCALAPPDATA%\FamilyFinance\family-finance.db`; the React/Tauri database is a separate encrypted `family-finance-v2.db` in its app-local data directory. It is intentionally not migrated automatically.
-- Financial data is local-first. The sole remote service is the optional Cloudflare Plaid broker; it holds encrypted broker-side tokens and never holds the local database.
+- Financial data is local-first. Connected-account credentials are isolated in purpose-specific Cloudflare brokers: Plaid for bank aggregation and TradeStation for the direct read-only brokerage connection. Each broker stores only encrypted provider tokens and never holds the local database.
 - The React/Tauri app represents money as integer cents. Avoid JavaScript floating-point values at persistence boundaries.
 - Never put database files, tokens, generated release artifacts, or `.tooling` content into source control. These paths are ignored.
 - Current release validation has not proven first-run database initialization under an isolated Windows user profile; see R-007 in [PROJECT-LOG.md](PROJECT-LOG.md).
@@ -100,6 +100,11 @@ The React/Tauri dev executable is always replaced in `artifacts\windows\dev\Fami
 - [MILESTONES.md](MILESTONES.md): acceptance criteria and delivery status.
 - [PROJECT-LOG.md](PROJECT-LOG.md): verification history, risks, and technical debt.
 - [RELEASE.md](RELEASE.md): development/release artifact commands and verification boundaries.
+- [../services/tradestation-broker/README.md](../services/tradestation-broker/README.md): TradeStation OAuth broker security model and operator setup.
+
+### TradeStation Dev/SIM OAuth
+
+The Dev build can initiate a TradeStation SIM authorization from **Investments** or **Settings**. It talks only to the separately deployed `money-map-tradestation-sim-broker` Worker and its dedicated D1 database; it must never reuse the production broker. The `EXTERNAL_SETUP_KEY` is entered once and held by Windows Credential Manager; it is never written to the local database or source tree. Money Map reserves `localhost:31022` for one callback for up to ten minutes, sends the authorization code to the dedicated Worker, and saves only the resulting broker connection key in Windows Credential Manager. The Worker keeps the provider client secret and encrypted refresh token. This authorizes a connection only; no portfolio synchronization endpoint exists yet.
 
 ## Worktree norms
 

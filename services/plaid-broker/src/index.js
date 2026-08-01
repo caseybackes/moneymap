@@ -107,7 +107,15 @@ async function syncTransactions(env, connection) {
 async function getAccounts(env, connection) {
   const accessToken = await decryptToken(connection.access_token_ciphertext, connection.access_token_iv, env.TOKEN_ENCRYPTION_KEY);
   const result = await plaidPost(env, "/accounts/get", { access_token: accessToken });
-  return result.accounts ?? [];
+  // This is Plaid's free, cached account-data endpoint. Do not substitute
+  // /accounts/balance/get here: that endpoint forces a real-time extraction
+  // and is billed separately. The desktop records both the provider timestamp
+  // (when available) and when Money Map retrieved this cached snapshot.
+  return {
+    accounts: result.accounts ?? [],
+    balanceSource: "cached_accounts_get",
+    balanceFetchedAt: new Date().toISOString()
+  };
 }
 
 function authorize(request, env) {
@@ -175,8 +183,8 @@ export default {
         // Local de-duplication, keyed by Plaid transaction id, makes this idempotent.
         connection.sync_cursor = null;
         const synced = await syncTransactions(env, connection);
-        const accounts = await getAccounts(env, connection);
-        return json({ connection: { id: connection.id, institutionName: connection.institution_name }, accounts, ...synced });
+        const accountSnapshot = await getAccounts(env, connection);
+        return json({ connection: { id: connection.id, institutionName: connection.institution_name }, ...accountSnapshot, ...synced });
       } catch {
         return problem(502, "plaid_sandbox_error", "Plaid Sandbox sync failed.");
       }
@@ -259,7 +267,8 @@ export default {
       try {
         if (operation === "sync") {
           const synced = await syncTransactions(env, connection);
-          return json({ connection: { id: connection.id, institutionName: connection.institution_name, environment: "sandbox" }, accounts: await getAccounts(env, connection), ...synced });
+          const accountSnapshot = await getAccounts(env, connection);
+          return json({ connection: { id: connection.id, institutionName: connection.institution_name, environment: "sandbox" }, ...accountSnapshot, ...synced });
         }
         const accessToken = await decryptToken(connection.access_token_ciphertext, connection.access_token_iv, env.TOKEN_ENCRYPTION_KEY);
         await plaidPost(env, "/item/remove", { access_token: accessToken });
@@ -315,7 +324,9 @@ export default {
 
       try {
         if (operation === "sync") {
-          return json(await syncTransactions(env, connection));
+          const synced = await syncTransactions(env, connection);
+          const accountSnapshot = await getAccounts(env, connection);
+          return json({ connection: { id: connection.id, institutionName: connection.institution_name, environment: connection.environment }, ...accountSnapshot, ...synced });
         }
 
         const accessToken = await decryptToken(connection.access_token_ciphertext, connection.access_token_iv, env.TOKEN_ENCRYPTION_KEY);

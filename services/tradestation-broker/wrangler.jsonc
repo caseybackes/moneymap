@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "money-map-tradestation-broker",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "vars": {
+    "APP_ENVIRONMENT": "production",
+    "TRADESTATION_REDIRECT_URI": "http://localhost:31022"
+  },
+  "d1_databases": [
+    {
+      "binding": "TRADESTATION_DB",
+      "database_name": "money-map-tradestation-broker",
+      "database_id": "2c2bb504-7052-40a0-a982-37f510934c69",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}
