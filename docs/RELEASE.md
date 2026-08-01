@@ -25,6 +25,8 @@ The Tauri value is compiled into the executable and is the authoritative runtime
 
 The development executable includes only Sandbox account-connection handlers. The production executable excludes those handlers.
 
+Linux uses the same application source but has no packaging or runtime-validation workflow yet. That work is intentionally deferred and tracked in [BACKLOG.md](BACKLOG.md#linux-delivery-deferred).
+
 ## GitHub release policy
 
 Generated executables, PDBs, local databases, and credentials do not go in Git. Each public application build should be attached to a GitHub Release tagged as `vMAJOR.MINOR.PATCH`, after clean-build and smoke-test evidence is recorded.

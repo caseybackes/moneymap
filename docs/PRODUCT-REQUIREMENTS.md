@@ -55,6 +55,9 @@ Money Map is an installed, local-first desktop application for one person to mod
 - AI analysis, when present, interprets calculated scenario results; it is not the scenario input interface.
 - The initial scenario UI supports structured monthly income, spending, contribution, one-time, and horizon inputs. Its projection remains isolated from the ledger. Calendar/ledger scenario overlays and AI analysis remain future work.
 - Financial analysis is the primary product value. Ingestion through manual entry, statement files, or connected accounts exists to build a trustworthy local financial picture for analysis.
+- Money Map's long-term planning target is a deep financial copilot: it synthesizes a user's banking, debt, credit, insurance, investments, retirement, taxes, benefits, and stated goals into a small number of materially important planning opportunities.
+- The AI planning experience should prepare a decision-ready first-pass plan: what matters, the cross-domain connection, relevant evidence, assumptions, estimated numerical impact where possible, open questions, and the appropriate professional review when needed.
+- The product prioritizes meaningful financial strategy over superficial spending prompts. Every suggested action or research question must be tied to the user's financial picture and allow drill-down to its source records.
 - The analysis roadmap includes explainable merchant clustering, category proposals, category and cash-flow trends, recurring/outlier detection, and drill-down from every insight to underlying records.
 - A later opportunity-analysis layer may assess user-provided account, insurance, and tax information for potential savings or tax-impact questions. It must show evidence, assumptions, uncertainty, and require review; it never makes financial decisions or changes automatically.
 

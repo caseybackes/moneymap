@@ -14,6 +14,7 @@ This is a decision and implementation queue. Items are intentionally recorded be
 - [ ] **Account-card disclosure** — Clicking an account card should reveal its detail/options panel. Keep `Update balance` out of the default card surface and show it only in that selected state.
 - [ ] **Navigation visual direction** — Decide between a refined fixed side rail and top tabs before restructuring navigation. Adopt a coherent free icon set with clear labels/tooltips; candidate implementation source: Lucide (MIT).
 - [ ] **Settings and About** — Add a Settings route with persisted user preferences, initially font-size selection and an About/build-information panel. Build information shows product version, build channel (`Dev` or `Production`), build timestamp/commit where available, desktop/runtime versions, and key dependency versions relevant to support.
+- [ ] **Bottom-of-rail profile menu** — Place a persistent user-profile icon at the bottom of the fixed navigation rail, visually separated from primary view icons. Clicking it opens an anchored account/options menu, similar in interaction to the desktop ChatGPT profile menu. Initial items: Profile and goals, AI-memory/privacy controls, Settings, and About/build information. It remains visible while page content scrolls and light-dismisses when the user clicks elsewhere.
 
 ## Product decisions needed
 
@@ -39,6 +40,12 @@ This is a decision and implementation queue. Items are intentionally recorded be
 - [ ] **Version provenance** — Generate a build-info record at publish time. It carries the semantic version, channel, build UTC timestamp, source commit, Rust/Tauri/React/Node versions, and a dependency-lockfile fingerprint. Surface it read-only in Settings/About and include it in diagnostics without exposing secrets or financial data.
 - [ ] **Settings storage** — Persist user preferences in the local encrypted application database or a dedicated local settings store under the application-data directory. User settings are runtime data, never source files.
 
+## Linux delivery (deferred)
+
+- [ ] **Linux release channel** — The React/Tauri application code and SQLCipher data model are shared with Windows; Linux work is a release/runtime-validation gap. Add a Linux publish workflow, beginning with an AppImage or equivalent broadly portable package, plus a fixed Linux artifact location and release asset/checksum process.
+- [ ] **Linux runtime validation** — Smoke-test the packaged client on a real Linux desktop. Verify window behavior, encrypted-database startup/restart, credential-store behavior, manual ledger workflows, and the no-network local-first path before claiming Linux support.
+- [ ] **Linux credential-store support decision** — Validate the existing Linux keyring backend across supported desktop environments. Document supported secret-service prerequisites and a recovery path before enabling connected-account flows on Linux.
+
 ## Analytics as the primary product value
 
 Data connection and manual entry are ingestion paths. The product's central value is a trustworthy analysis layer over the user's complete financial picture.
@@ -49,3 +56,22 @@ Data connection and manual entry are ingestion paths. The product's central valu
 - [ ] Keep what-if modeling numerical and structured; provide AI interpretation only after the scenario calculation is complete.
 - [ ] Later: offer evidence-backed financial opportunity analysis across user-provided account, insurance, and tax information: possible savings, coverage gaps, and tax-impact questions. Present assumptions, confidence, and caveats; require user review and never perform an action automatically.
 - [ ] Define the privacy/consent model before any external AI receives financial data. Preserve local-first operation when no provider is configured.
+
+## AI financial-planning harness (discovery before implementation)
+
+The goal is a user-controlled planning partner that connects the user's full financial picture: banking, credit, insurance, investments, taxes, credit health, and stated goals. It produces evidence-linked observations, questions, options, and numerical plans; it does not initiate financial, insurance, tax, or investment actions.
+
+- [ ] **Financial profile and goals** — Model the user's household-independent objectives, constraints, time horizon, risk preferences, life events, and explicit corrections. Each app installation remains one independent profile; a family member uses their own installation/profile.
+- [ ] **Structured financial facts** — Keep canonical balances, transactions, holdings, coverage, tax inputs, and source dates in the encrypted local database. AI summaries and memories must link back to source records, carry confidence/freshness, and never become the authoritative financial record.
+- [ ] **Action-item engine** — Surface prioritised opportunities and questions across categories such as cash flow, debt, insurance coverage, tax planning, and investments. Every item must show its inputs, assumptions, numerical effect where calculable, and a user-approved status; retain a decision history.
+- [ ] **Cross-domain planning workspace** — Add dedicated domain views and structured inputs for insurance, investments/retirement, taxes, credit/debt, and benefits as the relevant data model matures. Their purpose is to complete the user's financial picture and support cross-domain planning, not to create disconnected dashboards.
+- [ ] **Decision-ready planning brief** — Turn the highest-value observations into a concise plan: material issue/opportunity, evidence, cross-domain linkage, assumptions, numerical scenarios, unanswered questions, next action, and recommended professional review where appropriate.
+- [ ] **AI conversation and memory** — Make long-lived conversational memory optional and inspectable. Separate explicit user preferences/goals, verified financial facts, derived summaries, and conversation history; allow view, correction, export, and deletion for each class.
+- [ ] **Local-only memory baseline** — Store structured memory, summaries, source links, retrieval indexes, and any embeddings inside the encrypted local database. Treat embeddings as sensitive derived financial data. Any index must be rebuildable from encrypted canonical records; no memory service, vector store, or Cloudflare storage is required.
+- [ ] **Local-only privacy mode** — Define a strict mode in which financial records, memory, retrieval, embeddings, and AI inference remain on-device with no outbound requests. A mode that uses cloud inference while retaining memory locally must disclose that retrieved context is still sent to the selected provider.
+- [ ] **Provider-agnostic AI contract** — Define model, embedding, tool-calling, and streaming interfaces independent of a specific provider. Support local inference and user-supplied providers before considering a managed service.
+- [ ] **AI tool boundary** — Expose narrowly typed, permission-scoped tools such as read financial summary, retrieve cited transactions, run a numerical scenario, and draft an action item. Tool calls must be auditable and no tool may mutate financial data or trigger an external action without explicit user confirmation.
+- [ ] **Cloud AI tier decision** — If a managed tier is offered, use a dedicated broker boundary for authentication, provider credentials, rate limits, billing/metering, and request audit metadata. Define data minimization, per-request consent, retention, encryption/key ownership, deletion, and provider terms before sending financial context off-device.
+- [ ] **Memory framework evaluation** — Evaluate Hindsight, Holographic Memory, and similar systems only against the above portability, encryption, deletion, provenance, and provider-agnostic requirements. Do not make a framework the canonical store or provider lock-in point.
+- [ ] **MCP and skills boundary** — Application runtime capabilities use typed app tools. MCP is a later optional integration surface for external agents; coding-agent skills are development tooling and are not the Money Map end-user AI runtime.
+- [ ] **Advice safety and review** — Present planning output as decision support with uncertainty and source citations. For tax, insurance, investment, or legal decisions, prompt the user to review with the appropriate qualified professional where warranted.
