@@ -4,6 +4,7 @@ param()
 $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
+$versionSync = Join-Path $PSScriptRoot 'sync-tauri-version.ps1'
 $desktopRoot = Join-Path $repositoryRoot 'apps\desktop'
 $node = 'C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
 $tauriCli = Join-Path $desktopRoot 'node_modules\@tauri-apps\cli\tauri.js'
@@ -12,6 +13,7 @@ $binary = Join-Path $desktopRoot 'src-tauri\target\release\family-finance-deskto
 
 if (-not (Test-Path -LiteralPath $node)) { throw "Current Node runtime was not found: $node" }
 if (-not (Test-Path -LiteralPath $tauriCli)) { throw 'Install the desktop dependencies before publishing: npm install (from apps\desktop).' }
+& $versionSync
 
 $env:PATH = "C:\Strawberry\perl\bin;C:\Users\Admin\.cargo\bin;$env:PATH"
 Push-Location $desktopRoot
