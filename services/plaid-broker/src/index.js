@@ -149,7 +149,7 @@ export default {
     }
 
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({ service: "money-map-broker-dev", status: "ok" });
+      return json({ service: "money-map-plaid-broker", status: "ok" });
     }
 
     if (request.method === "GET" && url.pathname === "/") {

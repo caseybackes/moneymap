@@ -7,7 +7,7 @@ test("health is public and non-cacheable", async () => {
 
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await response.json(), { service: "money-map-broker-dev", status: "ok" });
+  assert.deepEqual(await response.json(), { service: "money-map-plaid-broker", status: "ok" });
 });
 
 test("public project and privacy pages are available", async () => {

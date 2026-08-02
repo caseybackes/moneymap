@@ -6,7 +6,7 @@ This Cloudflare Worker is the remote security boundary for Plaid. The desktop ap
 
 The first deployment exposes `GET /health`, a project page, and privacy page. Plaid Sandbox routes remain unavailable until Cloudflare secrets and the D1 database are configured.
 
-1. Create the Worker named `money-map-broker` in Cloudflare.
+1. Create the Worker named `money-map-plaid-broker` in Cloudflare.
 2. Deploy this source with Wrangler.
 3. Confirm `https://<worker>.workers.dev/health` returns JSON with `status: "ok"`.
 

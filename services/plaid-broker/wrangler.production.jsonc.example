@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "money-map-broker",
+  "name": "money-map-plaid-broker-production",
   "main": "src/index.js",
   "compatibility_date": "2026-08-01",
   "workers_dev": true,
@@ -8,7 +8,7 @@
   "d1_databases": [
     {
       "binding": "BROKER_DB",
-      "database_name": "money-map-broker-production",
+      "database_name": "money-map-plaid-broker-production",
       "database_id": "REPLACE_WITH_SEPARATE_PRODUCTION_D1_ID",
       "migrations_dir": "migrations"
     }
