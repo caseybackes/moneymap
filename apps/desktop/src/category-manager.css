@@ -1,0 +1,8 @@
+.category-manager{display:grid;gap:12px}
+.category-manager .empty-copy{margin:0}
+.category-list{display:flex;flex-wrap:wrap;gap:8px}
+.category-list span{background:#111923;border:1px solid #354b64;border-radius:999px;color:#dce8f5;padding:7px 10px;font-size:12px}
+.category-manager form{display:flex;align-items:end;gap:8px}
+.category-manager label{display:grid;gap:6px;flex:1;color:#b7c5d6;font-size:12px}
+.category-manager input{width:100%;font:inherit;color:#f3f7fb;background:#111923;border:1px solid #40556d;border-radius:7px;padding:8px 9px}
+.category-manager .secondary-action{padding:7px 11px}

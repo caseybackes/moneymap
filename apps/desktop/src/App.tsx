@@ -1,9 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import { CalendarDays, ChartNoAxesCombined, CircleUserRound, LayoutDashboard, ReceiptText, Repeat2, Sparkles, Tags, WalletCards } from "lucide-react";
+import { CalendarDays, ChartNoAxesCombined, Check, ChevronRight, CircleUserRound, Ellipsis, LayoutDashboard, Link2, LoaderCircle, Pencil, Plus, ReceiptText, RefreshCw, Repeat2, SkipForward, Sparkles, Trash2, Unplug, WalletCards, X } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePlaidLink } from "react-plaid-link";
+import moneyMapIcon from "../src-tauri/icons/money-map-plaid-1024.png";
+import "./category-manager.css";
+import "./shell-layout.css";
 
-type Account = { id: string; name: string; accountType: string; balanceCents: number; plaidSubtype?: string | null; plaidMask?: string | null; plaidAvailableBalanceCents?: number | null; plaidRefreshedAt?: string | null };
+type Account = { id: string; name: string; accountType: string; balanceCents: number; plaidConnectionId?: string | null; plaidAccountSubtype?: string | null; mask?: string | null; availableBalanceCents?: number | null; balanceRefreshedAt?: string | null };
 type LedgerEntry = { id: string; accountId: string; transactionDate: string; description: string; accountName: string; categoryName: string; categoryId: string | null; amountCents: number };
 type DashboardData = { incomeCents: number; spendingCents: number; accounts: Account[]; recentTransactions: LedgerEntry[] };
 type LedgerData = { transactions: LedgerEntry[] };
@@ -14,16 +17,43 @@ type RecurringSuggestion = { accountId: string; accountName: string; description
 type CalendarItem = { id: string; description: string; amountCents: number; scheduled?: boolean };
 type ConnectedInstitution = { id: string; institutionName: string; environment: string; accountCount: number };
 type AppCapabilities = { sandboxEnabled: boolean };
+type PlaidSyncResult = { changed: number; pendingConnections: number; statuses: string[] };
 type TradeStationConnectionStatus = { status: "not_connected" | "preparing" | "waiting_for_browser" | "exchanging" | "connected" | "failed"; message: string; connectionId: string | null };
-type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts" | "investments" | "scenarios" | "categories" | "settings";
+type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts" | "investments" | "scenarios" | "settings";
 type PendingDisconnect = { connection: ConnectedInstitution; confirming: boolean };
 
 const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
 const formatMoney = (cents: number) => money.format(cents / 100);
 const formatMaskedAccountIdentifier = (mask?: string | null) => mask?.trim() ? `****${mask.trim()}` : null;
+const wait = (milliseconds: number) => new Promise(resolve => window.setTimeout(resolve, milliseconds));
 
-function Widget({ title, children, className = "" }: { title: string; children: React.ReactNode; className?: string }) {
-  return <section className={`widget ${className}`}><h2>{title}</h2>{children}</section>;
+async function synchronizePlaidHistory(onProgress: (attempt: number) => void, maxAttempts = 20): Promise<PlaidSyncResult> {
+  let aggregate: PlaidSyncResult = { changed: 0, pendingConnections: 0, statuses: [] };
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const result = await invoke<PlaidSyncResult>("sync_plaid_sandbox_connections");
+    aggregate = {
+      changed: aggregate.changed + result.changed,
+      pendingConnections: result.pendingConnections,
+      statuses: result.statuses,
+    };
+    if (result.pendingConnections === 0) return aggregate;
+    onProgress(attempt);
+    if (attempt < maxAttempts) await wait(3_000);
+  }
+  return aggregate;
+}
+
+function Widget({ title, children, className = "", action }: { title: string; children: React.ReactNode; className?: string; action?: React.ReactNode }) {
+  return <section className={`widget ${className}`}><header className="widget-header"><h2>{title}</h2>{action}</header>{children}</section>;
+}
+
+function IconAction({ label, tone = "default", className = "", children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; tone?: "default" | "danger"; children: React.ReactNode }) {
+  return <button {...props} className={`icon-action ${tone === "danger" ? "danger" : ""} ${className}`.trim()} aria-label={label} title={label}>{children}</button>;
+}
+
+function OverflowActions({ label = "More actions", children }: { label?: string; children: React.ReactNode }) {
+  const details = useRef<HTMLDetailsElement>(null);
+  return <details className="overflow-actions" ref={details}><summary aria-label={label} title={label}><Ellipsis aria-hidden="true" /></summary><div className="overflow-menu" role="menu" onClick={() => details.current?.removeAttribute("open")}>{children}</div></details>;
 }
 
 function NetWorthChart({ netWorth, transactions }: { netWorth: number; transactions: LedgerEntry[] }) {
@@ -101,13 +131,19 @@ export function App() {
         if (!capabilities.sandboxEnabled || initialConnections.length === 0) { setStartupSyncMessage("Local profile ready."); return; }
         setStartupSyncMessage(`Refreshing ${initialConnections.length} connected Sandbox ${initialConnections.length === 1 ? "institution" : "institutions"}…`);
         try {
-          await invoke<number>("sync_plaid_sandbox_connections");
+          const syncResult = await synchronizePlaidHistory(attempt => {
+            if (!cancelled) setStartupSyncMessage(`Plaid is preparing transaction history… retry ${attempt} of 20`);
+          });
           const [refreshedDashboard, refreshedConnections, refreshedSchedules] = await Promise.all([
             invoke<DashboardData>("dashboard_data"), invoke<ConnectedInstitution[]>("plaid_connections_data"), invoke<Schedule[]>("scheduled_data")
           ]);
           if (cancelled || epoch !== storeEpoch.current) return;
           setDashboard(refreshedDashboard); setConnections(refreshedConnections); setSchedules(refreshedSchedules);
-          setStartupSyncMessage("Connected Sandbox accounts are up to date.");
+          if (syncResult.pendingConnections > 0) {
+            setStartupSyncWarning("Plaid is still preparing transaction history. Saved account balances are available, and Money Map will continue on the next startup or manual sync.");
+          } else {
+            setStartupSyncMessage("Connected Sandbox accounts are up to date.");
+          }
         } catch (reason) {
           if (cancelled || epoch !== storeEpoch.current) return;
           setStartupSyncWarning(`Could not refresh Sandbox accounts. Showing saved local data. ${String(reason)}`);
@@ -126,7 +162,7 @@ export function App() {
   const periodSpending = -periodTransactions.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0);
   const periodLabel = rangeMonths === null ? "All activity" : rangeMonths === 1 ? "Last month" : rangeMonths === 12 ? "Last year" : `Last ${rangeMonths} months`;
   async function addSuggestedSchedule(item: RecurringSuggestion) { await invoke("create_schedule", { input: { accountId: item.accountId, startDate: item.nextOccurrence, description: item.description, amountCents: item.amountCents, recurrence: item.recurrence } }); setSuggestions(current => current.filter(candidate => !(candidate.accountId === item.accountId && candidate.description === item.description && candidate.amountCents === item.amountCents))); }
-  async function syncConnectedAccounts() { setSyncingAccounts(true); setError(null); setSyncMessage(null); try { const changed = await invoke<number>("sync_plaid_sandbox_connections"); setSyncMessage(changed === 0 ? "Up to date." : `Synced ${changed} transaction change${changed === 1 ? "" : "s"}.`); refresh(); if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
+  async function syncConnectedAccounts() { setSyncingAccounts(true); setError(null); setSyncMessage("Refreshing connected accounts…"); try { const result = await synchronizePlaidHistory(attempt => setSyncMessage(`Plaid is preparing transaction history… retry ${attempt} of 20`)); setSyncMessage(result.pendingConnections > 0 ? "Plaid is still preparing transaction history. Retry later or restart Money Map." : result.changed === 0 ? "Up to date." : `Synced ${result.changed} transaction change${result.changed === 1 ? "" : "s"}.`); refresh(); if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
   async function disconnectConnectedAccount(connection: ConnectedInstitution) { setPendingDisconnect({ connection, confirming: false }); }
   async function confirmDisconnect() {
     const pending = pendingDisconnect;
@@ -156,14 +192,13 @@ export function App() {
 
   return <main className="app-shell">
     <aside className="rail" aria-label="Primary navigation">
-      <div className="brand-mark">F</div>
+      <div className="brand-mark" role="img" aria-label="Money Map" style={{ background: `#0b1625 url(${moneyMapIcon}) center / cover no-repeat`, border: "1px solid #2c4059" }} />
       <button className={`nav-button ${view === "dashboard" ? "selected" : ""}`} onClick={() => setView("dashboard")} aria-label="Dashboard" aria-current={view === "dashboard" ? "page" : undefined} title="Dashboard"><LayoutDashboard aria-hidden="true" /></button>
       <button className={`nav-button ${view === "calendar" ? "selected" : ""}`} onClick={() => setView("calendar")} aria-label="Calendar" aria-current={view === "calendar" ? "page" : undefined} title="Calendar"><CalendarDays aria-hidden="true" /></button>
       <button className={`nav-button ${view === "ledger" ? "selected" : ""}`} onClick={() => setView("ledger")} aria-label="Ledger" aria-current={view === "ledger" ? "page" : undefined} title="Ledger"><ReceiptText aria-hidden="true" /></button>
       <button className={`nav-button ${view === "accounts" ? "selected" : ""}`} onClick={() => setView("accounts")} aria-label="Accounts and cards" aria-current={view === "accounts" ? "page" : undefined} title="Accounts and cards"><WalletCards aria-hidden="true" /></button>
       <button className={`nav-button ${view === "scheduled" ? "selected" : ""}`} onClick={() => setView("scheduled")} aria-label="Scheduled transactions" aria-current={view === "scheduled" ? "page" : undefined} title="Scheduled transactions"><Repeat2 aria-hidden="true" /></button>
       <button className={`nav-button ${view === "scenarios" ? "selected" : ""}`} onClick={() => setView("scenarios")} aria-label="Scenario modeling" aria-current={view === "scenarios" ? "page" : undefined} title="Scenario modeling"><Sparkles aria-hidden="true" /></button>
-      <button className={`nav-button ${view === "categories" ? "selected" : ""}`} onClick={() => setView("categories")} aria-label="Categories" aria-current={view === "categories" ? "page" : undefined} title="Categories"><Tags aria-hidden="true" /></button>
       <button className={`nav-button ${view === "investments" ? "selected" : ""}`} onClick={() => setView("investments")} aria-label="Investments" aria-current={view === "investments" ? "page" : undefined} title="Investments"><ChartNoAxesCombined aria-hidden="true" /></button>
       <div className="profile-rail">
         {profileMenuOpen ? <div className="profile-menu" role="menu"><strong>Local profile</strong><small>Money Map on this device</small><button onClick={() => { setProfileMenuOpen(false); setView("settings"); }}>Settings & connections</button></div> : null}
@@ -171,7 +206,7 @@ export function App() {
       </div>
     </aside>
     <section className="page">
-      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" || view === "scenarios" ? "PLANNING" : view === "investments" ? "PORTFOLIO" : view === "settings" ? "PROFILE" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : view === "investments" ? "Investments" : view === "categories" ? "Categories" : view === "scenarios" ? "Scenario modeling" : view === "settings" ? "Settings" : "Ledger"}</h1></div>{view !== "scenarios" && view !== "categories" && view !== "accounts" && view !== "investments" && view !== "settings" ? <button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : "transaction")}>{view === "scheduled" ? "Add schedule" : "Add transaction"}</button> : null}</header>
+      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" || view === "scenarios" ? "PLANNING" : view === "investments" ? "PORTFOLIO" : view === "settings" ? "PROFILE" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : view === "investments" ? "Investments" : view === "scenarios" ? "Scenario modeling" : view === "settings" ? "Settings" : "Ledger"}</h1></div>{view !== "scenarios" && view !== "accounts" && view !== "investments" && view !== "settings" ? <button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : "transaction")}>{view === "scheduled" ? "Add schedule" : "Add transaction"}</button> : null}</header>
       {startupSyncing ? <div className="startup-sync" role="status" aria-live="polite"><span className="sync-spinner" /><span><strong>{startupSyncMessage}</strong><small>Your dashboard remains available while the refresh runs.</small></span></div> : null}
       {!startupSyncing && startupSyncWarning ? <div className="startup-sync warning"><span>!</span><span><strong>Sandbox refresh did not finish.</strong><small>{startupSyncWarning}</small></span></div> : null}
       {error ? <div className="status error"><strong>Local data store unavailable.</strong><span>{error}</span><p>This file was encrypted with a key that is no longer available on this Windows profile. Starting fresh preserves the unreadable file as an archive and creates a new encrypted store.</p><button disabled={recoveringStore} onClick={() => void recoverLocalStore()}>{recoveringStore ? "Preparing fresh store…" : "Preserve file and start fresh"}</button></div> : null}
@@ -190,18 +225,18 @@ export function App() {
             <div className="range-buttons" aria-label="Net-worth date range">{[["1M",1],["3M",3],["6M",6],["1Y",12],["All",null]].map(([label, months]) => <button key={label as string} className={rangeMonths === months ? "active" : ""} onClick={() => setRangeMonths(months as number | null)}>{label}</button>)}</div>
           </div>
         </Widget>
-        <Widget title="Recent transactions" className="recent-widget">
+        <Widget title="Recent transactions" className="recent-widget" action={dashboard.recentTransactions.length > 0 ? <button className="widget-link" onClick={() => setView("ledger")}>View all <ChevronRight aria-hidden="true" /></button> : null}>
           {dashboard.recentTransactions.length === 0 ? <p className="empty-copy">Add a transaction or connect an account to start your ledger.</p> : <div className="transaction-list">{dashboard.recentTransactions.slice(0, 5).map((item) => <div className="transaction-row" key={item.id}><div><strong>{item.description}</strong><small>{item.transactionDate} · {item.accountName}</small></div><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div>}
         </Widget>
-        <Widget title="Accounts & cards" className="accounts-widget">
-          <div className="account-grid">
-            {dashboard.accounts.map((account) => <button type="button" className="account-card" onClick={() => { setSelectedAccountId(account.id); setView("accounts"); }} key={account.id}><small>{account.plaidSubtype ?? account.accountType}{formatMaskedAccountIdentifier(account.plaidMask) ? ` · ${formatMaskedAccountIdentifier(account.plaidMask)}` : ""}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong>{account.plaidAvailableBalanceCents !== null && account.plaidAvailableBalanceCents !== undefined ? <em>Available {formatMoney(account.plaidAvailableBalanceCents)}</em> : null}</button>)}
+        <Widget title="Accounts & cards" className="accounts-widget" action={dashboard.accounts.length > 0 ? <button className="widget-link" onClick={() => setView("accounts")}>View all <ChevronRight aria-hidden="true" /></button> : null}>
+          <div className="dashboard-account-list">
+            {dashboard.accounts.slice(0, 6).map((account) => <button type="button" className="account-card" onClick={() => { setSelectedAccountId(account.id); setView("accounts"); }} key={account.id}><small>{account.plaidAccountSubtype ?? account.accountType}{formatMaskedAccountIdentifier(account.mask) ? ` · ${formatMaskedAccountIdentifier(account.mask)}` : ""}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong>{account.availableBalanceCents !== null && account.availableBalanceCents !== undefined ? <em>Available {formatMoney(account.availableBalanceCents)}</em> : null}</button>)}
             {dashboard.accounts.length === 0 ? <DashboardConnectCard sandboxEnabled={sandboxEnabled} onImported={refresh} onManageAccounts={() => setView("accounts")} /> : null}
           </div>
         </Widget>
-        {schedules.length > 0 ? <Widget title="Upcoming" className="upcoming-widget"><div className="upcoming-list">{[...schedules].sort((left, right) => left.nextOccurrence.localeCompare(right.nextOccurrence)).slice(0, 5).map(item => <div className="upcoming-row" key={item.id}><div><strong>{item.description}</strong><small>{item.nextOccurrence} - {item.accountName} - {item.recurrence}</small></div><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div></Widget> : null}
-        {suggestions.length > 0 ? <Widget title="Recurring suggestions" className="suggestions-widget">
-          {suggestions.length === 0 ? <p className="empty-copy">No clear recurring patterns to review.</p> : <div className="suggestion-list">{suggestions.map(item => <div className="suggestion-row" key={`${item.accountId}:${item.description}:${item.amountCents}`}><div><strong>{item.description}</strong><small>{item.accountName} · {formatMoney(item.amountCents)} · {item.recurrence} · next {item.nextOccurrence}</small></div><span><button onClick={() => setSuggestions(current => current.filter(candidate => candidate !== item))}>Dismiss</button><button className="primary-action" onClick={() => void addSuggestedSchedule(item)}>Add schedule</button></span></div>)}</div>}
+        {schedules.length > 0 ? <Widget title="Upcoming" className="upcoming-widget" action={<button className="widget-link" onClick={() => setView("scheduled")}>View all <ChevronRight aria-hidden="true" /></button>}><div className="upcoming-list">{[...schedules].sort((left, right) => left.nextOccurrence.localeCompare(right.nextOccurrence)).slice(0, 4).map(item => <div className="upcoming-row" key={item.id}><div><strong>{item.description}</strong><small>{item.nextOccurrence} - {item.accountName} - {item.recurrence}</small></div><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div></Widget> : null}
+        {suggestions.length > 0 ? <Widget title="Recurring suggestions" className="suggestions-widget" action={suggestions.length > 4 ? <span className="widget-count">4 of {suggestions.length}</span> : null}>
+          <div className="suggestion-list">{suggestions.slice(0, 4).map(item => <div className="suggestion-row" key={`${item.accountId}:${item.description}:${item.amountCents}`}><div><strong>{item.description}</strong><small>{item.accountName} · {formatMoney(item.amountCents)} · {item.recurrence} · next {item.nextOccurrence}</small></div><span className="inline-actions"><IconAction label={`Dismiss ${item.description}`} onClick={() => setSuggestions(current => current.filter(candidate => candidate !== item))}><X aria-hidden="true" /></IconAction><IconAction label={`Add ${item.description} to scheduled transactions`} className="emphasized" onClick={() => void addSuggestedSchedule(item)}><Plus aria-hidden="true" /></IconAction></span></div>)}</div>
         </Widget> : null}
       </div> : null}
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onEdit={(entry) => { setEditingTransaction(entry); setDialog("transaction"); }} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
@@ -210,8 +245,7 @@ export function App() {
       {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} connections={connections} sandboxEnabled={sandboxEnabled} syncMessage={syncMessage} selectedAccountId={selectedAccountId} onSelectAccount={setSelectedAccountId} onAdd={() => setDialog("account")} onSync={() => void syncConnectedAccounts()} onDisconnect={(connection) => void disconnectConnectedAccount(connection)} syncing={syncingAccounts} /> : null}
       {view === "investments" ? <InvestmentView sandboxEnabled={sandboxEnabled} onOpenSettings={() => setView("settings")} /> : null}
       {view === "scenarios" ? <ScenarioModel netWorth={netWorth} incomeCents={dashboard?.incomeCents ?? 0} spendingCents={dashboard?.spendingCents ?? 0} /> : null}
-      {view === "categories" ? <CategoryManager categories={categories} onCreated={() => void invoke<Category[]>("categories_data").then(setCategories)} /> : null}
-      {view === "settings" ? <SettingsView sandboxEnabled={sandboxEnabled} onOpenInvestments={() => setView("investments")} /> : null}
+      {view === "settings" ? <SettingsView sandboxEnabled={sandboxEnabled} onOpenInvestments={() => setView("investments")} categories={categories} onCategoryCreated={() => void invoke<Category[]>("categories_data").then(setCategories)} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
       {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} categories={categories} entry={editingTransaction} onClose={() => { setDialog(null); setEditingTransaction(null); }} onSaved={() => { setDialog(null); setEditingTransaction(null); refresh(); if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {dialog === "schedule" ? <ScheduleDialog accounts={dashboard?.accounts ?? []} schedule={editingSchedule} onClose={() => { setDialog(null); setEditingSchedule(null); }} onSaved={() => { setDialog(null); setEditingSchedule(null); setView("scheduled"); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
@@ -241,10 +275,11 @@ function InvestmentView({ sandboxEnabled, onOpenSettings }: { sandboxEnabled: bo
   </div>;
 }
 
-function SettingsView({ sandboxEnabled, onOpenInvestments }: { sandboxEnabled: boolean; onOpenInvestments: () => void }) {
+function SettingsView({ sandboxEnabled, onOpenInvestments, categories, onCategoryCreated }: { sandboxEnabled: boolean; onOpenInvestments: () => void; categories: Category[]; onCategoryCreated: () => void }) {
   return <div className="settings-grid">
     <Widget title="External connections" className="settings-connections"><div className="connection-setting"><div><strong>TradeStation</strong><small>Direct read-only OAuth connection for brokerage balances, positions, and market data.</small><p>Client secret and OAuth refresh token remain in the dedicated Cloudflare TradeStation broker. Money Map receives imported investment records only.</p></div>{sandboxEnabled ? <TradeStationSimConnection compact /> : <button className="primary-action" onClick={onOpenInvestments}>View investment setup</button>}</div><div className="connection-setting"><div><strong>Banking and retirement institutions</strong><small>Plaid handles supported accounts, including eligible investment accounts.</small><p>Connect accounts through the Accounts & cards page. Production Plaid setup remains separate from Dev Sandbox.</p></div></div></Widget>
     <Widget title="Local profile" className="settings-profile"><strong>Money Map profile</strong><p>This desktop profile is local to this Windows user. Financial records are encrypted locally.</p><small>Appearance themes and financial goals will live here.</small></Widget>
+    <Widget title="Categories" className="settings-categories"><CategoryManager categories={categories} onCreated={onCategoryCreated} /></Widget>
   </div>;
 }
 
@@ -265,7 +300,7 @@ function Ledger({ transactions, onEdit, onDeleted }: { transactions: LedgerEntry
   useEffect(() => setVisible(50), [query, category, fromDate, toDate, amount]);
   async function remove(item: LedgerEntry) { if (!confirm(`Delete ${item.description}?`)) return; await invoke("delete_transaction", { transactionId: item.id }); onDeleted(); }
   function clearFilters() { setQuery(""); setCategory("all"); setFromDate(""); setToDate(""); setAmount(""); }
-  return <section className="ledger-widget"><div className="ledger-toolbar ledger-filters"><input aria-label="Search transactions" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search description or account" /><select aria-label="Filter by category" value={category} onChange={event => setCategory(event.target.value)}><option value="all">All categories</option>{categories.map(name => <option key={name} value={name}>{name}</option>)}</select><label>From<input type="date" value={fromDate} onChange={event => setFromDate(event.target.value)} /></label><label>To<input type="date" value={toDate} onChange={event => setToDate(event.target.value)} /></label><label>Min. amount<input type="number" min="0" step="0.01" value={amount} onChange={event => setAmount(event.target.value)} placeholder="$0.00" /></label><button onClick={clearFilters}>Clear</button><span>{filtered.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span></div>{filtered.length === 0 ? <p className="empty-copy">No matching transactions.</p> : filtered.slice(0, visible).map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><span><strong>{item.description}</strong><small>{item.categoryName}</small></span><span>{item.accountName}</span><span className="ledger-amount"><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong><div className="ledger-actions"><button onClick={() => onEdit(item)}>Edit</button><button onClick={() => void remove(item)}>Delete</button></div></span></div>)}</div>{visible < filtered.length ? <div className="ledger-load"><button className="primary-action" onClick={() => setVisible(count => count + 50)}>Load 50 more</button><span>{Math.min(visible, filtered.length)} of {filtered.length}</span></div> : null}</section>;
+  return <section className="ledger-widget"><div className="ledger-toolbar ledger-filters"><input aria-label="Search transactions" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search description or account" /><select aria-label="Filter by category" value={category} onChange={event => setCategory(event.target.value)}><option value="all">All categories</option>{categories.map(name => <option key={name} value={name}>{name}</option>)}</select><label>From<input type="date" value={fromDate} onChange={event => setFromDate(event.target.value)} /></label><label>To<input type="date" value={toDate} onChange={event => setToDate(event.target.value)} /></label><label>Min. amount<input type="number" min="0" step="0.01" value={amount} onChange={event => setAmount(event.target.value)} placeholder="$0.00" /></label><IconAction label="Clear filters" onClick={clearFilters}><X aria-hidden="true" /></IconAction><span>{filtered.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span><span aria-hidden="true" /></div>{filtered.length === 0 ? <p className="empty-copy">No matching transactions.</p> : filtered.slice(0, visible).map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><span className="ledger-description"><strong>{item.description}</strong><small>{item.categoryName}</small></span><span className="ledger-account">{item.accountName}</span><strong className={`ledger-value ${item.amountCents >= 0 ? "positive" : "negative"}`}>{formatMoney(item.amountCents)}</strong><div className="ledger-actions"><IconAction label={`Edit ${item.description}`} onClick={() => onEdit(item)}><Pencil aria-hidden="true" /></IconAction><OverflowActions label={`More actions for ${item.description}`}><button className="overflow-menu-item danger" role="menuitem" onClick={() => void remove(item)}><Trash2 aria-hidden="true" />Delete transaction</button></OverflowActions></div></div>)}</div>{visible < filtered.length ? <div className="ledger-load"><button className="secondary-action" onClick={() => setVisible(count => count + 50)}>Load 50 more</button><span>{Math.min(visible, filtered.length)} of {filtered.length}</span></div> : null}</section>;
 }
 
 function Scheduled({ schedules, onEdit, onChanged }: { schedules: Schedule[]; onEdit: (schedule: Schedule) => void; onChanged: () => void }) {
@@ -279,21 +314,71 @@ function Scheduled({ schedules, onEdit, onChanged }: { schedules: Schedule[]; on
       onChanged();
     } finally { setProcessing(null); }
   }
-  return <section className="ledger-widget scheduled-widget"><div className="ledger-head"><span>Next occurrence</span><span>Description</span><span>Account</span><span>Amount & actions</span></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.nextOccurrence}<small>{item.recurrence} · starts {item.startDate}{item.endDate ? ` · ends ${item.endDate}` : ""}</small></span><strong>{item.description}</strong><span>{item.accountName}</span><span className="schedule-actions"><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong><div><button onClick={() => onEdit(item)}>Edit</button><button disabled={processing !== null} onClick={() => void process(item, "skip")}>{processing === `skip:${item.id}` ? "Skipping…" : "Skip"}</button><button className="primary-action" disabled={processing !== null} onClick={() => void process(item, "record")}>{processing === `record:${item.id}` ? "Recording…" : "Record"}</button></div>{status[item.id] ? <small className="schedule-status">{status[item.id]}</small> : null}</span></div>)}</section>;
+  return <section className="ledger-widget scheduled-widget"><div className="ledger-head"><span>Next occurrence</span><span>Description</span><span>Account</span><span>Amount</span><span aria-hidden="true" /></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.nextOccurrence}<small>{item.recurrence} · starts {item.startDate}{item.endDate ? ` · ends ${item.endDate}` : ""}</small></span><span className="ledger-description"><strong>{item.description}</strong>{status[item.id] ? <small className="schedule-status" role="status">{status[item.id]}</small> : null}</span><span className="ledger-account">{item.accountName}</span><strong className={`ledger-value ${item.amountCents >= 0 ? "positive" : "negative"}`}>{formatMoney(item.amountCents)}</strong><div className="schedule-actions"><IconAction label={`Edit ${item.description}`} disabled={processing !== null} onClick={() => onEdit(item)}><Pencil aria-hidden="true" /></IconAction><IconAction label={`Skip ${item.nextOccurrence}`} disabled={processing !== null} onClick={() => void process(item, "skip")}>{processing === `skip:${item.id}` ? <LoaderCircle className="spin" aria-hidden="true" /> : <SkipForward aria-hidden="true" />}</IconAction><IconAction label={`Record ${item.nextOccurrence}`} disabled={processing !== null} onClick={() => void process(item, "record")}>{processing === `record:${item.id}` ? <LoaderCircle className="spin" aria-hidden="true" /> : <Check aria-hidden="true" />}</IconAction></div></div>)}</section>;
 }
 
 function Accounts({ accounts, connections, sandboxEnabled, syncMessage, selectedAccountId, onSelectAccount, onAdd, onSync, onDisconnect, syncing }: { accounts: Account[]; connections: ConnectedInstitution[]; sandboxEnabled: boolean; syncMessage: string | null; selectedAccountId: string | null; onSelectAccount: (accountId: string | null) => void; onAdd: () => void; onSync: () => void; onDisconnect: (connection: ConnectedInstitution) => void; syncing: boolean }) {
-  const selectedAccount = accounts.find(account => account.id === selectedAccountId) ?? null;
-  return <section className="ledger-widget accounts-page">{sandboxEnabled ? <><div className="accounts-toolbar"><span><p className="empty-copy">Connected Sandbox accounts can be refreshed without going through Link again.</p>{syncMessage ? <small className="sync-message">{syncMessage}</small> : null}</span><button className="primary-action" disabled={syncing || connections.length === 0} onClick={onSync}>{syncing ? "Syncing accounts…" : "Sync connected accounts"}</button></div>{connections.length > 0 ? <div className="connected-institutions">{connections.map(connection => <div key={connection.id}><span><strong>{connection.institutionName}</strong><small>{connection.accountCount} linked account{connection.accountCount === 1 ? "" : "s"} · {connection.environment}</small></span><button disabled={syncing} onClick={() => onDisconnect(connection)}>Disconnect</button></div>)}</div> : null}</> : null}<div className="account-grid">{accounts.map(account => <button type="button" className={`account-card ${selectedAccountId === account.id ? "selected" : ""}`} aria-pressed={selectedAccountId === account.id} onClick={() => onSelectAccount(selectedAccountId === account.id ? null : account.id)} key={account.id}><small>{account.accountType}{formatMaskedAccountIdentifier(account.plaidMask) ? ` · ${formatMaskedAccountIdentifier(account.plaidMask)}` : ""}</small><h3>{account.name}</h3><strong>{formatMoney(account.balanceCents)}</strong></button>)}<button className="connect-card" onClick={onAdd}><span>+</span><strong>Add local account</strong><small>Manual account or balance tracking</small></button>{sandboxEnabled ? <SandboxLinkButton onImported={() => window.location.reload()} /> : null}</div>{selectedAccount ? <section className="account-detail-panel" aria-label={`${selectedAccount.name} details`}><div><small>Selected account</small><h2>{selectedAccount.name}</h2><p>{selectedAccount.accountType}{selectedAccount.plaidSubtype ? ` · ${selectedAccount.plaidSubtype}` : ""}{formatMaskedAccountIdentifier(selectedAccount.plaidMask) ? ` · ${formatMaskedAccountIdentifier(selectedAccount.plaidMask)}` : ""}</p></div><div className="account-detail-balance"><small>{selectedAccount.plaidRefreshedAt ? "Cached Plaid balance" : "Current balance"}</small><strong>{formatMoney(selectedAccount.balanceCents)}</strong>{selectedAccount.plaidAvailableBalanceCents !== null && selectedAccount.plaidAvailableBalanceCents !== undefined ? <span>Available {formatMoney(selectedAccount.plaidAvailableBalanceCents)}</span> : null}</div><p className="account-detail-note">{selectedAccount.plaidRefreshedAt ? `Cached Plaid balance retrieved ${new Date(selectedAccount.plaidRefreshedAt).toLocaleString()}. Sync refreshes cached account data; Money Map does not request a paid real-time balance automatically.` : "This is a local account balance calculated from its opening balance and ledger activity."}</p></section> : null}</section>;
+  const linkedAccountIds = new Set(accounts.filter(account => account.plaidConnectionId).map(account => account.id));
+  const localAccounts = accounts.filter(account => !linkedAccountIds.has(account.id));
+  const connectionIds = new Set(connections.map(connection => connection.id));
+  const ungroupedLinkedAccounts = accounts.filter(account => account.plaidConnectionId && !connectionIds.has(account.plaidConnectionId));
+
+  function accountRows(groupAccounts: Account[]) {
+    if (groupAccounts.length === 0) return <p className="account-group-empty">No accounts selected for this connection.</p>;
+    return <div className="compact-account-list">{groupAccounts.map(account => {
+      const expanded = selectedAccountId === account.id;
+      const subtype = account.plaidAccountSubtype ?? account.accountType;
+      const mask = formatMaskedAccountIdentifier(account.mask);
+      return <div className={`compact-account ${expanded ? "expanded" : ""}`} key={account.id}>
+        <button type="button" className="compact-account-row" aria-expanded={expanded} onClick={() => onSelectAccount(expanded ? null : account.id)}>
+          <span className="account-kind">{subtype}{mask ? <small>{mask}</small> : null}</span>
+          <strong className="account-name">{account.name}</strong>
+          <span className="account-row-balance"><strong>{formatMoney(account.balanceCents)}</strong>{account.availableBalanceCents !== null && account.availableBalanceCents !== undefined ? <small>{formatMoney(account.availableBalanceCents)} available</small> : null}</span>
+          <ChevronRight aria-hidden="true" />
+        </button>
+        {expanded ? <section className="compact-account-details" aria-label={`${account.name} details`}>
+          <span><small>Source</small><strong>{account.plaidConnectionId ? "Plaid connection" : "Local account"}</strong></span>
+          <span><small>Account type</small><strong>{account.accountType}{account.plaidAccountSubtype ? ` · ${account.plaidAccountSubtype}` : ""}</strong></span>
+          {mask ? <span><small>Account</small><strong>{mask}</strong></span> : null}
+          <span><small>{account.balanceRefreshedAt ? "Last refreshed" : "Balance basis"}</small><strong>{account.balanceRefreshedAt ? new Date(account.balanceRefreshedAt).toLocaleString() : "Opening balance and ledger activity"}</strong></span>
+        </section> : null}
+      </div>;
+    })}</div>;
+  }
+
+  return <section className="ledger-widget accounts-page compact-accounts-page">
+    <div className="accounts-toolbar compact-accounts-toolbar">
+      <span><p className="empty-copy">{sandboxEnabled ? "Sandbox connections and local accounts" : "Connected and local accounts"}</p>{syncMessage ? <small className="sync-message">{syncMessage}</small> : null}</span>
+      <div className="account-page-actions">
+        {connections.length > 0 ? <IconAction label="Sync connected accounts" type="button" disabled={syncing} onClick={onSync}><RefreshCw aria-hidden="true" className={syncing ? "spin" : ""} /></IconAction> : null}
+        <IconAction label="Add local account" type="button" onClick={onAdd}><Plus aria-hidden="true" /></IconAction>
+        {sandboxEnabled ? <SandboxLinkButton compact onImported={() => window.location.reload()} /> : null}
+      </div>
+    </div>
+    <div className="account-groups">
+      {connections.map(connection => <section className="account-group" key={connection.id}>
+        <header className="account-group-header">
+          <span><strong>{connection.institutionName}</strong><small>{connection.accountCount} linked account{connection.accountCount === 1 ? "" : "s"} · {connection.environment}</small></span>
+          <OverflowActions label={`More actions for ${connection.institutionName}`}>
+            <button className="overflow-menu-item danger" disabled={syncing} onClick={() => onDisconnect(connection)}><Unplug aria-hidden="true" />Disconnect institution</button>
+          </OverflowActions>
+        </header>
+        {accountRows(accounts.filter(account => account.plaidConnectionId === connection.id))}
+      </section>)}
+      {ungroupedLinkedAccounts.length > 0 ? <section className="account-group"><header className="account-group-header"><span><strong>Connected accounts</strong><small>{ungroupedLinkedAccounts.length} account{ungroupedLinkedAccounts.length === 1 ? "" : "s"}</small></span></header>{accountRows(ungroupedLinkedAccounts)}</section> : null}
+      {localAccounts.length > 0 ? <section className="account-group"><header className="account-group-header"><span><strong>Local accounts</strong><small>{localAccounts.length} manually managed account{localAccounts.length === 1 ? "" : "s"}</small></span></header>{accountRows(localAccounts)}</section> : null}
+      {accounts.length === 0 ? <div className="empty-account-state"><WalletCards aria-hidden="true" /><strong>No accounts yet</strong><span>Add a local account or connect an institution to begin.</span></div> : null}
+    </div>
+  </section>;
 }
 
 function CategoryManager({ categories, onCreated }: { categories: Category[]; onCreated: () => void }) {
   const [name, setName] = useState(""); const [error, setError] = useState<string | null>(null);
   async function add(event: FormEvent<HTMLFormElement>) { event.preventDefault(); try { await invoke("create_category", { name }); setName(""); setError(null); onCreated(); } catch (reason) { setError(String(reason)); } }
-  return <div className="category-layout"><Widget title="Preferred categories" className="category-list"><p className="empty-copy">Used for manual entries and future category suggestions.</p><div>{categories.map(category => <span key={category.id}>{category.name}</span>)}</div></Widget><Widget title="Add category" className="category-add"><form onSubmit={add}><label>Name<input value={name} onChange={event => setName(event.target.value)} required placeholder="Pet care" /></label><button className="primary-action" type="submit">Add category</button>{error ? <p className="form-error">{error}</p> : null}</form></Widget></div>;
+  return <div className="category-manager"><p className="empty-copy">Used for manual entries and category suggestions.</p><div className="category-list">{categories.map(category => <span key={category.id}>{category.name}</span>)}</div><form onSubmit={add}><label>Name<input value={name} onChange={event => setName(event.target.value)} required placeholder="Pet care" /></label><button className="secondary-action" type="submit">Add</button>{error ? <p className="form-error">{error}</p> : null}</form></div>;
 }
 
-function SandboxLinkButton({ onImported }: { onImported: () => void }) {
+function SandboxLinkButton({ onImported, compact = false }: { onImported: () => void; compact?: boolean }) {
   const [session, setSession] = useState<SandboxLinkSession | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -302,7 +387,8 @@ function SandboxLinkButton({ onImported }: { onImported: () => void }) {
     try { setSession(await invoke<SandboxLinkSession>("create_plaid_sandbox_link_session")); }
     catch (reason) { setMessage(String(reason)); setLoading(false); }
   }
-  if (session) return <PlaidLinkLauncher session={session} onDone={() => { setSession(null); setLoading(false); onImported(); }} onCancelled={() => { setSession(null); setLoading(false); }} />;
+  if (session) return <PlaidLinkLauncher compact={compact} session={session} onDone={() => { setSession(null); setLoading(false); onImported(); }} onCancelled={() => { setSession(null); setLoading(false); }} />;
+  if (compact) return <button className="primary-action compact-connect-action" type="button" onClick={() => void begin()} disabled={loading}><Link2 aria-hidden="true" />{loading ? "Preparing…" : "Connect account"}</button>;
   return <div className="connect-card sandbox-link-card"><span>+</span><strong>{loading ? "Preparing Plaid Link…" : "Connect Sandbox account"}</strong><small>Uses Plaid Link · Sandbox only · no Trial slot</small><button onClick={() => void begin()} disabled={loading}>{loading ? "Working…" : "Open Plaid Link"}</button>{message ? <small className="form-error">{message}</small> : null}</div>;
 }
 
@@ -311,7 +397,7 @@ function DashboardConnectCard({ sandboxEnabled, onImported, onManageAccounts }: 
   return <button className="connect-card production-connect-card" onClick={onManageAccounts}><span>+</span><strong>Connect new account</strong><small>Secure account connections are not configured in this build. View account options.</small></button>;
 }
 
-function PlaidLinkLauncher({ session, onDone, onCancelled }: { session: SandboxLinkSession; onDone: () => void; onCancelled: () => void }) {
+function PlaidLinkLauncher({ session, onDone, onCancelled, compact = false }: { session: SandboxLinkSession; onDone: () => void; onCancelled: () => void; compact?: boolean }) {
   const [status, setStatus] = useState("Opening Plaid Link…");
   const completingRef = useRef(false);
   const { open, ready } = usePlaidLink({
@@ -320,7 +406,7 @@ function PlaidLinkLauncher({ session, onDone, onCancelled }: { session: SandboxL
       completingRef.current = true;
       setStatus("Importing encrypted Sandbox records…");
       try {
-        await invoke<number>("complete_plaid_sandbox_link", { input: {
+        await invoke<PlaidSyncResult>("complete_plaid_sandbox_link", { input: {
           sessionId: session.sessionId, sessionSecret: session.sessionSecret, publicToken,
           institutionId: metadata.institution?.institution_id ?? null, institutionName: metadata.institution?.name ?? null,
           selectedAccountIds: metadata.accounts.map(account => account.id),
@@ -331,6 +417,7 @@ function PlaidLinkLauncher({ session, onDone, onCancelled }: { session: SandboxL
     onExit: () => { if (!completingRef.current) onCancelled(); },
   });
   useEffect(() => { if (ready) open(); }, [open, ready]);
+  if (compact) return <span className="compact-link-status" role="status">{status}</span>;
   return <div className="connect-card sandbox-link-card"><span>↗</span><strong>{status}</strong><small>{ready ? "Complete or cancel the Plaid window." : "Loading Plaid Link…"}</small></div>;
 }
 

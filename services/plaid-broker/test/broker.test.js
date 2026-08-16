@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import worker from "../src/index.js";
+import worker, { transactionSyncState } from "../src/index.js";
+
+test("transaction sync remains pending until Plaid reports historical history ready", () => {
+  assert.deepEqual(transactionSyncState("NOT_READY"), {
+    operation: "idle",
+    transactionsStatus: "NOT_READY",
+    initialUpdateComplete: false,
+    historicalUpdateComplete: false,
+    pending: true
+  });
+  assert.equal(transactionSyncState("INITIAL_UPDATE_COMPLETE").pending, true);
+  assert.equal(transactionSyncState("HISTORICAL_UPDATE_COMPLETE").pending, false);
+  assert.equal(transactionSyncState("HISTORICAL_UPDATE_COMPLETE", "syncing").pending, true);
+});
 
 test("health is public and non-cacheable", async () => {
   const response = await worker.fetch(new Request("https://broker.example/health"), {});

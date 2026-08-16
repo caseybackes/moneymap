@@ -79,29 +79,75 @@ async function plaidPost(env, path, body) {
 
 async function getConnection(env, id) {
   return env.BROKER_DB.prepare(`SELECT id, plaid_item_id, institution_id, institution_name,
-    access_token_ciphertext, access_token_iv, owner_secret_hash, sync_cursor, environment
+    access_token_ciphertext, access_token_iv, owner_secret_hash, sync_cursor, environment,
+    transactions_update_status, sync_operation_state, sync_started_at
     FROM connections WHERE id = ?`).bind(id).first();
 }
 
+export function transactionSyncState(status, operation = "idle") {
+  const transactionsStatus = status || "TRANSACTIONS_UPDATE_STATUS_UNKNOWN";
+  const initialUpdateComplete = transactionsStatus === "INITIAL_UPDATE_COMPLETE" || transactionsStatus === "HISTORICAL_UPDATE_COMPLETE";
+  const historicalUpdateComplete = transactionsStatus === "HISTORICAL_UPDATE_COMPLETE";
+  return {
+    operation,
+    transactionsStatus,
+    initialUpdateComplete,
+    historicalUpdateComplete,
+    pending: operation === "syncing" || !historicalUpdateComplete
+  };
+}
+
 async function syncTransactions(env, connection) {
-  const accessToken = await decryptToken(connection.access_token_ciphertext, connection.access_token_iv, env.TOKEN_ENCRYPTION_KEY);
-  const originalCursor = connection.sync_cursor ?? undefined;
-  let cursor = originalCursor;
+  // Startup and user-triggered refreshes can overlap. Acquire a two-minute
+  // lease before contacting Plaid; a stale lease may be reclaimed after a
+  // Worker interruption.
+  const lease = await env.BROKER_DB.prepare(`UPDATE connections
+    SET sync_operation_state = 'syncing', sync_started_at = unixepoch(), last_sync_error = NULL
+    WHERE id = ? AND (sync_operation_state <> 'syncing' OR sync_started_at IS NULL OR sync_started_at < unixepoch() - 120)`)
+    .bind(connection.id).run();
+  if ((lease.meta?.changes ?? 0) === 0) {
+    return {
+      added: [], modified: [], removed: [], nextCursor: connection.sync_cursor ?? null,
+      syncState: transactionSyncState(connection.transactions_update_status, "syncing")
+    };
+  }
+
   const added = [];
   const modified = [];
   const removed = [];
+  let cursor = connection.sync_cursor ?? undefined;
+  let updateStatus = connection.transactions_update_status ?? "TRANSACTIONS_UPDATE_STATUS_UNKNOWN";
 
-  do {
-    const result = await plaidPost(env, "/transactions/sync", { access_token: accessToken, ...(cursor ? { cursor } : {}) });
-    added.push(...result.added);
-    modified.push(...result.modified);
-    removed.push(...result.removed);
-    cursor = result.next_cursor;
-    if (!result.has_more) {
-      await env.BROKER_DB.prepare("UPDATE connections SET sync_cursor = ?, updated_at = unixepoch() WHERE id = ?").bind(cursor, connection.id).run();
-      return { added, modified, removed, nextCursor: cursor };
-    }
-  } while (true);
+  try {
+    const accessToken = await decryptToken(connection.access_token_ciphertext, connection.access_token_iv, env.TOKEN_ENCRYPTION_KEY);
+    do {
+      const result = await plaidPost(env, "/transactions/sync", { access_token: accessToken, ...(cursor ? { cursor } : {}) });
+      added.push(...(result.added ?? []));
+      modified.push(...(result.modified ?? []));
+      removed.push(...(result.removed ?? []));
+      cursor = result.next_cursor;
+      updateStatus = result.transactions_update_status ?? updateStatus;
+      if (!result.has_more) break;
+    } while (true);
+
+    // Commit the cursor only after the complete page sequence. This prevents a
+    // failed partial run from skipping changes on the next attempt.
+    await env.BROKER_DB.prepare(`UPDATE connections
+      SET sync_cursor = ?, transactions_update_status = ?, sync_operation_state = 'idle',
+          sync_started_at = NULL, last_transaction_sync_at = unixepoch(), last_sync_error = NULL,
+          updated_at = unixepoch()
+      WHERE id = ?`).bind(cursor, updateStatus, connection.id).run();
+    return {
+      added, modified, removed, nextCursor: cursor,
+      syncState: transactionSyncState(updateStatus)
+    };
+  } catch (error) {
+    const failure = error instanceof Error ? error.message.slice(0, 160) : "Plaid transaction sync failed";
+    await env.BROKER_DB.prepare(`UPDATE connections
+      SET sync_operation_state = 'error', sync_started_at = NULL, last_sync_error = ?, updated_at = unixepoch()
+      WHERE id = ?`).bind(failure, connection.id).run();
+    throw error;
+  }
 }
 
 async function getAccounts(env, connection) {

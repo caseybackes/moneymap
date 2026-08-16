@@ -130,6 +130,15 @@ struct SandboxLinkSession {
 }
 
 #[cfg(feature = "sandbox-dev")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaidSyncResult {
+    changed: usize,
+    pending_connections: usize,
+    statuses: Vec<String>,
+}
+
+#[cfg(feature = "sandbox-dev")]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompleteSandboxLinkInput {
@@ -215,6 +224,24 @@ fn database_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let directory = app.path().app_local_data_dir().map_err(|error| error.to_string())?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     Ok(directory.join("money-map.db"))
+}
+
+#[cfg(feature = "sandbox-dev")]
+fn remove_sandbox_database(path: &std::path::Path) {
+    let mut targets = vec![path.to_path_buf()];
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        targets.push(sidecar.into());
+    }
+
+    for target in targets {
+        match fs::remove_file(&target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => eprintln!("could not remove sandbox database file {}: {error}", target.display()),
+        }
+    }
 }
 
 fn write_diagnostic(app: &AppHandle, event: &str) {
@@ -766,6 +793,17 @@ fn apply_plaid_sync(app: &AppHandle, local_connection_id: &str, payload: &Value)
 }
 
 #[cfg(feature = "sandbox-dev")]
+fn plaid_sync_result(changed: usize, payloads: &[Value]) -> PlaidSyncResult {
+    let pending_connections = payloads.iter()
+        .filter(|payload| payload["syncState"]["pending"].as_bool().unwrap_or(false))
+        .count();
+    let statuses = payloads.iter()
+        .filter_map(|payload| payload["syncState"]["transactionsStatus"].as_str().map(str::to_owned))
+        .collect();
+    PlaidSyncResult { changed, pending_connections, statuses }
+}
+
+#[cfg(feature = "sandbox-dev")]
 fn apply_plaid_sync_connection(connection: &mut Connection, local_connection_id: &str, payload: &Value) -> Result<usize, String> {
     let institution = payload["connection"]["institutionName"].as_str().unwrap_or("Plaid Sandbox institution");
     // Sync can be triggered by startup and a user action at nearly the same time.
@@ -893,7 +931,7 @@ async fn create_plaid_sandbox_link_session() -> Result<SandboxLinkSession, Strin
 
 #[cfg(feature = "sandbox-dev")]
 #[tauri::command]
-async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkInput) -> Result<usize, String> {
+async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkInput) -> Result<PlaidSyncResult, String> {
     let selected_fingerprint = selected_account_fingerprint(&input.selected_account_ids);
     let existing = {
         let (connection, _) = open_database(&app)?;
@@ -914,7 +952,8 @@ async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkI
         let payload = tauri::async_runtime::spawn_blocking(move || {
             broker_post(&format!("connections/{broker_connection_id}/sync"), Value::Object(Default::default()), Some(&connection_secret))
         }).await.map_err(|error| error.to_string())??;
-        return apply_plaid_sync(&app, &local_connection_id, &payload);
+        let changed = apply_plaid_sync(&app, &local_connection_id, &payload)?;
+        return Ok(plaid_sync_result(changed, &[payload]));
     }
     let session_id = input.session_id.clone();
     let session_secret = input.session_secret.clone();
@@ -945,12 +984,13 @@ async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkI
         let key = connection_secret.to_owned();
         move || broker_post(&format!("connections/{id}/sync"), Value::Object(Default::default()), Some(&key))
     }).await.map_err(|error| error.to_string())??;
-    apply_plaid_sync(&app, &local_connection_id, &payload)
+    let changed = apply_plaid_sync(&app, &local_connection_id, &payload)?;
+    Ok(plaid_sync_result(changed, &[payload]))
 }
 
 #[cfg(feature = "sandbox-dev")]
 #[tauri::command]
-async fn sync_plaid_sandbox_connections(app: AppHandle) -> Result<usize, String> {
+async fn sync_plaid_sandbox_connections(app: AppHandle) -> Result<PlaidSyncResult, String> {
     let connections = {
         let (connection, _) = open_database(&app)?;
         let mut statement = connection.prepare("SELECT id, broker_connection_id, connection_secret FROM plaid_connections WHERE environment = 'sandbox'")
@@ -959,15 +999,16 @@ async fn sync_plaid_sandbox_connections(app: AppHandle) -> Result<usize, String>
             .map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
         records
     };
-    if connections.is_empty() { return Ok(0); }
+    if connections.is_empty() { return Ok(PlaidSyncResult { changed: 0, pending_connections: 0, statuses: Vec::new() }); }
     let payloads = tauri::async_runtime::spawn_blocking(move || -> Result<Vec<(String, Value)>, String> {
         connections.into_iter().map(|(local_id, broker_id, secret)| {
             broker_post(&format!("connections/{broker_id}/sync"), Value::Object(Default::default()), Some(&secret)).map(|payload| (local_id, payload))
         }).collect()
     }).await.map_err(|error| error.to_string())??;
     let mut changed = 0;
-    for (local_id, payload) in payloads { changed += apply_plaid_sync(&app, &local_id, &payload)?; }
-    Ok(changed)
+    for (local_id, payload) in &payloads { changed += apply_plaid_sync(&app, local_id, payload)?; }
+    let payload_values: Vec<Value> = payloads.into_iter().map(|(_, payload)| payload).collect();
+    Ok(plaid_sync_result(changed, &payload_values))
 }
 
 #[tauri::command]
@@ -1216,11 +1257,20 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 
 #[cfg(feature = "sandbox-dev")]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(TradeStationOAuthState::default())
         .invoke_handler(tauri::generate_handler![app_capabilities, database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections, plaid_connections_data, disconnect_plaid_sandbox_connection, save_tradestation_sim_setup_key, tradestation_sim_connection_status, start_tradestation_sim_connection])
-        .run(tauri::generate_context!())
-        .expect("error while running Money Map Dev");
+        .build(tauri::generate_context!())
+        .expect("error while building Money Map Dev");
+
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            if let Ok(path) = database_path(app_handle) {
+                write_diagnostic(app_handle, "clean exit; removing disposable sandbox database");
+                remove_sandbox_database(&path);
+            }
+        }
+    });
 }
 
 #[cfg(all(test, feature = "sandbox-dev"))]
@@ -1306,6 +1356,20 @@ mod plaid_sync_tests {
 
     fn count(connection: &Connection, table: &str) -> i64 {
         connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn clean_dev_exit_removes_database_and_sqlite_sidecars() {
+        let path = std::env::temp_dir().join(format!("money-map-dev-cleanup-{}.db", new_id()));
+        std::fs::write(&path, b"database").unwrap();
+        std::fs::write(format!("{}-wal", path.display()), b"wal").unwrap();
+        std::fs::write(format!("{}-shm", path.display()), b"shm").unwrap();
+
+        remove_sandbox_database(&path);
+
+        assert!(!path.exists());
+        assert!(!std::path::Path::new(&format!("{}-wal", path.display())).exists());
+        assert!(!std::path::Path::new(&format!("{}-shm", path.display())).exists());
     }
 
     #[test]
