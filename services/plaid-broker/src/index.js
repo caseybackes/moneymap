@@ -14,11 +14,36 @@ const page = (title, body) => new Response(`<!doctype html>
 <title>${title}</title><style>body{max-width:46rem;margin:4rem auto;padding:0 1.5rem;font:16px/1.55 system-ui,sans-serif;color:#18212f}h1{line-height:1.15}a{color:#0759b4}</style></head>
 <body>${body}</body></html>`, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
 
-const sandboxUrl = "https://sandbox.plaid.com";
+const plaidUrls = {
+  sandbox: "https://sandbox.plaid.com",
+  production: "https://production.plaid.com"
+};
+
+function appEnvironment(env) {
+  if (env.APP_ENVIRONMENT !== "sandbox" && env.APP_ENVIRONMENT !== "production") {
+    throw new Error('APP_ENVIRONMENT must be exactly "sandbox" or "production".');
+  }
+  return env.APP_ENVIRONMENT;
+}
+
+function plaidUrl(env) {
+  return plaidUrls[appEnvironment(env)];
+}
+
+export function accountSelectionLinkTokenRequest(environment, connectionId, accessToken) {
+  return {
+    client_name: environment === "sandbox" ? "Money Map Dev Sandbox" : "Money Map",
+    language: "en",
+    country_codes: ["US"],
+    user: { client_user_id: `${environment}-connection-${connectionId}` },
+    access_token: accessToken,
+    update: { account_selection_enabled: true }
+  };
+}
 
 function requirePlaid(env) {
   if (!env.PLAID_CLIENT_ID || !env.PLAID_SECRET || !env.TOKEN_ENCRYPTION_KEY || !env.BROKER_DB) {
-    return problem(503, "plaid_not_configured", "Plaid sandbox has not been configured.");
+    return problem(503, "plaid_not_configured", "Plaid has not been configured for this environment.");
   }
 
   return null;
@@ -63,7 +88,7 @@ async function decryptToken(ciphertext, iv, keyText) {
 }
 
 async function plaidPost(env, path, body) {
-  const response = await fetch(`${sandboxUrl}${path}`, {
+  const response = await fetch(`${plaidUrl(env)}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ client_id: env.PLAID_CLIENT_ID, secret: env.PLAID_SECRET, ...body })
@@ -180,7 +205,7 @@ function notImplemented() {
   return problem(501, "not_configured", "Plaid access is not configured yet.");
 }
 
-async function authorizeSandboxConnection(request, connection) {
+async function authorizeConnection(request, connection) {
   const presented = request.headers.get("x-money-map-connection-key");
   if (!presented || !connection.owner_secret_hash) return false;
   return (await secretHash(presented)) === connection.owner_secret_hash;
@@ -189,23 +214,35 @@ async function authorizeSandboxConnection(request, connection) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const sandboxRoute = url.pathname.startsWith("/v1/sandbox/");
-    if (sandboxRoute && env.APP_ENVIRONMENT !== "sandbox") {
-      return problem(404, "sandbox_unavailable", "Sandbox routes are unavailable in this environment.");
-    }
 
     if (request.method === "GET" && url.pathname === "/health") {
       return json({ service: "money-map-plaid-broker", status: "ok" });
     }
 
+    let environment;
+    try {
+      environment = appEnvironment(env);
+    } catch (error) {
+      return problem(500, "invalid_environment", error instanceof Error ? error.message : String(error));
+    }
+
+    const sandboxRoute = url.pathname.startsWith("/v1/sandbox/");
+    if (sandboxRoute && environment !== "sandbox") {
+      return problem(404, "sandbox_unavailable", "Sandbox routes are unavailable in this environment.");
+    }
+
     if (request.method === "GET" && url.pathname === "/") {
-      return page("Money Map Dev", `<h1>Money Map Dev</h1>
-        <p>Money Map Dev is a private desktop budgeting application for individual financial tracking. This Sandbox service supports development-only account connections.</p>
+      const title = environment === "sandbox" ? "Money Map Dev" : "Money Map";
+      const description = environment === "sandbox"
+        ? "This Sandbox service supports development-only account connections."
+        : "This service securely brokers user-authorized financial account connections for Money Map.";
+      return page(title, `<h1>${title}</h1>
+        <p>Money Map is a private, local-first desktop finance application. ${description}</p>
         <p><a href="/privacy">Privacy</a> · <a href="mailto:cloud-admin@caseybackes.com">Contact</a></p>`);
     }
 
     if (request.method === "GET" && url.pathname === "/privacy") {
-      return page("Money Map Dev privacy", `<h1>Privacy</h1>
+      return page(`${environment === "sandbox" ? "Money Map Dev" : "Money Map"} privacy`, `<h1>Privacy</h1>
         <p>Money Map is a private local-first budgeting application. Financial-account connection credentials are entered only through Plaid Link and are not received or stored by Money Map.</p>
         <p>When a connection is enabled, this service stores an encrypted Plaid access token and the minimum connection metadata needed to import account and transaction data. The desktop application stores the imported budgeting data locally on the user's device.</p>
         <p>Connection data is used only to provide account synchronization for the connected household. It is not sold or used for advertising. Disconnecting an institution removes its stored Plaid access token and ends further synchronization.</p>
@@ -236,10 +273,11 @@ export default {
       }
     }
 
-    // Sandbox Link is deliberately isolated from real-bank access. Link token
-    // creation issues a one-time broker session; the session secret is needed
-    // to complete and later synchronize this specific Sandbox Item.
-    if (request.method === "POST" && url.pathname === "/v1/sandbox/link-token") {
+    // Each deployment has an isolated Plaid environment, D1 database, and
+    // encryption key. A one-time session secret authorizes Link completion;
+    // a distinct per-connection secret authorizes later sync and disconnect.
+    const linkTokenRoute = url.pathname === "/v1/link-token" || url.pathname === "/v1/sandbox/link-token";
+    if (request.method === "POST" && linkTokenRoute) {
       const configFailure = requirePlaid(env);
       if (configFailure) return configFailure;
       try {
@@ -248,80 +286,137 @@ export default {
         await env.BROKER_DB.prepare(`INSERT INTO sandbox_link_sessions(id, secret_hash, expires_at)
           VALUES (?, ?, unixepoch() + 14400)`).bind(sessionId, await secretHash(sessionSecret)).run();
         const result = await plaidPost(env, "/link/token/create", {
-          client_name: "Money Map Dev Sandbox",
+          client_name: environment === "sandbox" ? "Money Map Dev Sandbox" : "Money Map",
           language: "en",
           country_codes: ["US"],
           products: ["transactions"],
           transactions: { days_requested: 180 },
-          user: { client_user_id: `sandbox-${sessionId}` }
+          user: { client_user_id: `${environment}-${sessionId}` }
         });
         return json({ linkToken: result.link_token, expiration: result.expiration, sessionId, sessionSecret });
       } catch {
-        return problem(502, "plaid_sandbox_error", "Plaid Sandbox did not create a Link token.");
+        return problem(502, "plaid_error", "Plaid did not create a Link token.");
       }
     }
 
-    if (request.method === "POST" && url.pathname === "/v1/sandbox/link-complete") {
+    const linkCompleteRoute = url.pathname === "/v1/link-complete" || url.pathname === "/v1/sandbox/link-complete";
+    if (request.method === "POST" && linkCompleteRoute) {
       const configFailure = requirePlaid(env);
       if (configFailure) return configFailure;
       const body = await readJson(request);
       if (!body?.sessionId || !body?.sessionSecret || !body?.publicToken) {
-        return problem(400, "invalid_request", "A Sandbox session and Plaid public token are required.");
+        return problem(400, "invalid_request", "A Link session and Plaid public token are required.");
       }
-      const session = await env.BROKER_DB.prepare(`SELECT id, secret_hash FROM sandbox_link_sessions
+      let session = await env.BROKER_DB.prepare(`SELECT id, secret_hash, completion_state, completion_started_at,
+        completed_connection_id, completed_secret_ciphertext, completed_secret_iv, completed_institution_name
+        FROM sandbox_link_sessions
         WHERE id = ? AND expires_at > unixepoch()`).bind(body.sessionId).first();
       if (!session || (await secretHash(body.sessionSecret)) !== session.secret_hash) {
-        return problem(401, "invalid_sandbox_session", "The Sandbox Link session is invalid or expired.");
+        return problem(401, "invalid_link_session", "The Link session is invalid or expired.");
       }
+      if (session.completion_state === "completed") {
+        const connectionSecret = await decryptToken(session.completed_secret_ciphertext, session.completed_secret_iv, env.TOKEN_ENCRYPTION_KEY);
+        return json({ connection: {
+          id: session.completed_connection_id,
+          institutionName: session.completed_institution_name,
+          connectionSecret,
+          environment
+        }, replayed: true });
+      }
+      const claim = await env.BROKER_DB.prepare(`UPDATE sandbox_link_sessions
+        SET completion_state = 'completing', completion_started_at = unixepoch()
+        WHERE id = ? AND (completion_state = 'pending' OR (completion_state = 'completing' AND completion_started_at < unixepoch() - 120))`)
+        .bind(session.id).run();
+      if ((claim.meta?.changes ?? 0) === 0) {
+        session = await env.BROKER_DB.prepare(`SELECT completion_state, completed_connection_id,
+          completed_secret_ciphertext, completed_secret_iv, completed_institution_name
+          FROM sandbox_link_sessions WHERE id = ?`).bind(session.id).first();
+        if (session?.completion_state === "completed") {
+          const connectionSecret = await decryptToken(session.completed_secret_ciphertext, session.completed_secret_iv, env.TOKEN_ENCRYPTION_KEY);
+          return json({ connection: { id: session.completed_connection_id, institutionName: session.completed_institution_name, connectionSecret, environment }, replayed: true });
+        }
+        return problem(409, "link_completion_in_progress", "This Link completion is already in progress. Retry the same session.");
+      }
+      let exchangedAccessToken = null;
       try {
         const exchange = await plaidPost(env, "/item/public_token/exchange", { public_token: body.publicToken });
+        exchangedAccessToken = exchange.access_token;
         const institution = body.institution ?? {};
         const encrypted = await encryptToken(exchange.access_token, env.TOKEN_ENCRYPTION_KEY);
         const connectionId = crypto.randomUUID();
         const connectionSecret = randomSecret();
-        await env.BROKER_DB.prepare(`INSERT INTO connections
-          (id, plaid_item_id, institution_id, institution_name, access_token_ciphertext, access_token_iv, owner_secret_hash, environment)
-          VALUES (?, ?, ?, ?, ?, ?, ?, 'sandbox')`).bind(
-          connectionId,
-          exchange.item_id,
-          typeof institution.institution_id === "string" ? institution.institution_id : "sandbox-link",
-          typeof institution.name === "string" ? institution.name : "Plaid Sandbox institution",
-          encrypted.ciphertext,
-          encrypted.iv,
-          await secretHash(connectionSecret)
-        ).run();
-        await env.BROKER_DB.prepare("DELETE FROM sandbox_link_sessions WHERE id = ?").bind(session.id).run();
+        const encryptedConnectionSecret = await encryptToken(connectionSecret, env.TOKEN_ENCRYPTION_KEY);
+        const institutionName = typeof institution.name === "string" ? institution.name : "Plaid institution";
+        await env.BROKER_DB.batch([
+          env.BROKER_DB.prepare(`INSERT INTO connections
+            (id, plaid_item_id, institution_id, institution_name, access_token_ciphertext, access_token_iv, owner_secret_hash, environment)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+            connectionId,
+            exchange.item_id,
+            typeof institution.institution_id === "string" ? institution.institution_id : "plaid-link",
+            institutionName,
+            encrypted.ciphertext,
+            encrypted.iv,
+            await secretHash(connectionSecret),
+            environment
+          ),
+          env.BROKER_DB.prepare(`UPDATE sandbox_link_sessions SET completion_state = 'completed',
+            completed_connection_id = ?, completed_secret_ciphertext = ?, completed_secret_iv = ?,
+            completed_institution_name = ? WHERE id = ?`).bind(
+            connectionId, encryptedConnectionSecret.ciphertext, encryptedConnectionSecret.iv, institutionName, session.id
+          )
+        ]);
         return json({ connection: {
           id: connectionId,
-          institutionName: typeof institution.name === "string" ? institution.name : "Plaid Sandbox institution",
+          institutionName,
           connectionSecret,
-          environment: "sandbox"
+          environment
         } }, { status: 201 });
       } catch {
-        return problem(502, "plaid_sandbox_error", "Plaid Sandbox could not complete Link.");
+        if (exchangedAccessToken) {
+          let revoked = false;
+          try {
+            await plaidPost(env, "/item/remove", { access_token: exchangedAccessToken });
+            revoked = true;
+          } catch {}
+          await env.BROKER_DB.prepare("UPDATE sandbox_link_sessions SET completion_state = ? WHERE id = ?")
+            .bind(revoked ? "failed" : "recovery_required", session.id).run();
+        } else {
+          await env.BROKER_DB.prepare("UPDATE sandbox_link_sessions SET completion_state = 'pending', completion_started_at = NULL WHERE id = ?")
+            .bind(session.id).run();
+        }
+        return problem(502, "plaid_error", "Plaid could not complete Link.");
       }
     }
 
-    const sandboxConnectionMatch = /^\/v1\/sandbox\/connections\/([^/]+)\/(sync|disconnect)$/.exec(url.pathname);
-    if (sandboxConnectionMatch && request.method === "POST") {
+    const userConnectionMatch = /^\/v1\/(?:sandbox\/)?connections\/([^/]+)\/(sync|disconnect|account-selection-link-token)$/.exec(url.pathname);
+    if (userConnectionMatch && request.method === "POST") {
       const configFailure = requirePlaid(env);
       if (configFailure) return configFailure;
-      const [, connectionId, operation] = sandboxConnectionMatch;
+      const [, connectionId, operation] = userConnectionMatch;
       const connection = await getConnection(env, connectionId);
-      if (!connection || connection.environment !== "sandbox") return problem(404, "connection_not_found", "Sandbox connection not found.");
-      if (!(await authorizeSandboxConnection(request, connection))) return problem(401, "unauthorized", "This Sandbox connection requires its local connection key.");
+      if (!connection || connection.environment !== environment) return problem(404, "connection_not_found", "Connection not found.");
+      if (!(await authorizeConnection(request, connection))) return problem(401, "unauthorized", "This connection requires its local connection key.");
       try {
+        if (operation === "account-selection-link-token") {
+          const accessToken = await decryptToken(connection.access_token_ciphertext, connection.access_token_iv, env.TOKEN_ENCRYPTION_KEY);
+          const result = await plaidPost(env, "/link/token/create", accountSelectionLinkTokenRequest(environment, connection.id, accessToken));
+          return json({ linkToken: result.link_token, expiration: result.expiration });
+        }
         if (operation === "sync") {
           const synced = await syncTransactions(env, connection);
           const accountSnapshot = await getAccounts(env, connection);
-          return json({ connection: { id: connection.id, institutionName: connection.institution_name, environment: "sandbox" }, ...accountSnapshot, ...synced });
+          return json({ connection: { id: connection.id, institutionName: connection.institution_name, environment }, ...accountSnapshot, ...synced });
         }
         const accessToken = await decryptToken(connection.access_token_ciphertext, connection.access_token_iv, env.TOKEN_ENCRYPTION_KEY);
         await plaidPost(env, "/item/remove", { access_token: accessToken });
-        await env.BROKER_DB.prepare("DELETE FROM connections WHERE id = ?").bind(connectionId).run();
+        await env.BROKER_DB.batch([
+          env.BROKER_DB.prepare("DELETE FROM connections WHERE id = ?").bind(connectionId),
+          env.BROKER_DB.prepare("UPDATE sandbox_link_sessions SET completion_state = 'revoked' WHERE completed_connection_id = ?").bind(connectionId)
+        ]);
         return new Response(null, { status: 204 });
       } catch {
-        return problem(502, "plaid_sandbox_error", "Plaid Sandbox request failed.");
+        return problem(502, "plaid_error", "Plaid request failed.");
       }
     }
 
@@ -360,7 +455,7 @@ export default {
       return json({ connections: result.results });
     }
 
-    const connectionMatch = /^\/v1\/connections\/([^/]+)\/(sync|disconnect)$/.exec(url.pathname);
+    const connectionMatch = /^\/v1\/admin\/connections\/([^/]+)\/(sync|disconnect)$/.exec(url.pathname);
     if (connectionMatch && request.method === "POST") {
       const configFailure = requirePlaid(env);
       if (configFailure) return configFailure;
@@ -380,15 +475,13 @@ export default {
         await env.BROKER_DB.prepare("DELETE FROM connections WHERE id = ?").bind(connectionId).run();
         return new Response(null, { status: 204 });
       } catch (error) {
-        return problem(502, "plaid_sandbox_error", "Plaid Sandbox request failed.");
+        return problem(502, "plaid_error", "Plaid request failed.");
       }
     }
 
     // These routes remain closed until their secrets, token store, and Plaid
     // integration are deployed together. Never log request bodies or authorization headers.
     if (
-      (request.method === "POST" && url.pathname === "/v1/link/session") ||
-      (request.method === "POST" && url.pathname === "/v1/link/complete") ||
       (request.method === "POST" && url.pathname === "/v1/sync") ||
       (request.method === "POST" && /^\/v1\/items\/[^/]+\/disconnect$/.test(url.pathname))
     ) {
