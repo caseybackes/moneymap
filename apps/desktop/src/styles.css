@@ -163,3 +163,14 @@ h1{font-size:27px;letter-spacing:-.02em}
 .widget-count{color:#8fa1b6;font-size:11px;font-variant-numeric:tabular-nums}
 .dashboard-account-list .account-card:nth-child(n+7){display:grid}
 @media(max-width:1050px){.page{padding:24px 22px 40px}}
+
+/* Production profile recovery and same-Windows-profile backup controls. */
+.recovery-panel{display:grid;gap:14px;margin:0 0 18px;padding:18px;border:1px solid #b76464;border-radius:12px;background:#241c24;color:#f3f7fb}
+.recovery-panel h2{margin:2px 0 7px;font-size:18px}
+.recovery-panel p{margin:0;color:#c8d4e2}
+.recovery-panel small{display:block;margin-top:7px;color:#aebed0}
+.recovery-actions{display:flex;flex-wrap:wrap;gap:9px}
+.recovery-note{padding-top:11px;border-top:1px solid #503846;font-size:12px}
+.settings-backup-actions{display:grid;justify-items:start;gap:9px;margin:14px 0}
+.backup-result{display:grid;gap:3px;max-width:100%;font-size:12px}
+.backup-result span{max-width:100%;overflow-wrap:anywhere;color:#9fc8ea}

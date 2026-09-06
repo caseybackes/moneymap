@@ -17,6 +17,9 @@ type RecurringSuggestion = { accountId: string; accountName: string; description
 type CalendarItem = { id: string; description: string; amountCents: number; scheduled?: boolean };
 type ConnectedInstitution = { id: string; institutionName: string; environment: string; accountCount: number };
 type AppCapabilities = { sandboxEnabled: boolean };
+type RecoveryStatus = { state: string; recoveryRequired: boolean; authorityUnknown: boolean; databaseExists: boolean; databaseReadable: boolean; backupAvailable: boolean; orphanedConnections: number; message: string };
+type ProfileBackupResult = { backupPath: string; createdAt: number };
+type ProfileBackupSummary = { path: string; createdAt: number; sourceSchemaVersion: number; applicationVersion: string };
 type PlaidSyncResult = { changed: number; pendingConnections: number; statuses: string[] };
 type TradeStationConnectionStatus = { status: "not_connected" | "preparing" | "waiting_for_browser" | "exchanging" | "connected" | "failed"; message: string; connectionId: string | null };
 type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts" | "investments" | "scenarios" | "settings";
@@ -30,7 +33,7 @@ const wait = (milliseconds: number) => new Promise(resolve => window.setTimeout(
 async function synchronizePlaidHistory(onProgress: (attempt: number) => void, maxAttempts = 20): Promise<PlaidSyncResult> {
   let aggregate: PlaidSyncResult = { changed: 0, pendingConnections: 0, statuses: [] };
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const result = await invoke<PlaidSyncResult>("sync_plaid_sandbox_connections");
+    const result = await invoke<PlaidSyncResult>("sync_plaid_connections");
     aggregate = {
       changed: aggregate.changed + result.changed,
       pendingConnections: result.pendingConnections,
@@ -89,6 +92,7 @@ export function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [recoveringStore, setRecoveringStore] = useState(false);
+  const [recoveryStatus, setRecoveryStatus] = useState<RecoveryStatus | null>(null);
   const [dialog, setDialog] = useState<"account" | "transaction" | "schedule" | null>(null);
   const [view, setView] = useState<View>("dashboard");
   const [ledger, setLedger] = useState<LedgerData | null>(null);
@@ -123,13 +127,21 @@ export function App() {
     void (async () => {
       const epoch = storeEpoch.current;
       try {
+        const profileRecovery = await invoke<RecoveryStatus>("recovery_status");
+        if (cancelled || epoch !== storeEpoch.current) return;
+        setRecoveryStatus(profileRecovery);
+        if (profileRecovery.recoveryRequired) {
+          setError(null);
+          setStartupSyncing(false);
+          return;
+        }
         const [initialDashboard, initialCategories, initialConnections, initialSchedules, capabilities] = await Promise.all([
           invoke<DashboardData>("dashboard_data"), invoke<Category[]>("categories_data"), invoke<ConnectedInstitution[]>("plaid_connections_data"), invoke<Schedule[]>("scheduled_data"), invoke<AppCapabilities>("app_capabilities")
         ]);
         if (cancelled || epoch !== storeEpoch.current) return;
         setDashboard(initialDashboard); setCategories(initialCategories); setConnections(initialConnections); setSchedules(initialSchedules); setSandboxEnabled(capabilities.sandboxEnabled); setError(null);
-        if (!capabilities.sandboxEnabled || initialConnections.length === 0) { setStartupSyncMessage("Local profile ready."); return; }
-        setStartupSyncMessage(`Refreshing ${initialConnections.length} connected Sandbox ${initialConnections.length === 1 ? "institution" : "institutions"}…`);
+        if (initialConnections.length === 0) { setStartupSyncMessage("Local profile ready."); return; }
+        setStartupSyncMessage(`Refreshing ${initialConnections.length} connected ${initialConnections.length === 1 ? "institution" : "institutions"}…`);
         try {
           const syncResult = await synchronizePlaidHistory(attempt => {
             if (!cancelled) setStartupSyncMessage(`Plaid is preparing transaction history… retry ${attempt} of 20`);
@@ -142,11 +154,11 @@ export function App() {
           if (syncResult.pendingConnections > 0) {
             setStartupSyncWarning("Plaid is still preparing transaction history. Saved account balances are available, and Money Map will continue on the next startup or manual sync.");
           } else {
-            setStartupSyncMessage("Connected Sandbox accounts are up to date.");
+            setStartupSyncMessage("Connected accounts are up to date.");
           }
         } catch (reason) {
           if (cancelled || epoch !== storeEpoch.current) return;
-          setStartupSyncWarning(`Could not refresh Sandbox accounts. Showing saved local data. ${String(reason)}`);
+          setStartupSyncWarning(`Could not refresh connected accounts. Showing saved local data. ${String(reason)}`);
         }
       } catch (reason) { if (!cancelled && epoch === storeEpoch.current) setError(String(reason)); }
       finally { if (!cancelled && epoch === storeEpoch.current) setStartupSyncing(false); }
@@ -169,7 +181,7 @@ export function App() {
     if (!pending) return;
     setPendingDisconnect({ ...pending, confirming: true }); setSyncingAccounts(true);
     try {
-      await invoke("disconnect_plaid_sandbox_connection", { connectionId: pending.connection.id });
+      await invoke("disconnect_plaid_connection", { connectionId: pending.connection.id });
       setConnections(current => current.filter(item => item.id !== pending.connection.id));
       refresh();
       void invoke<LedgerData>("ledger_data").then(setLedger);
@@ -188,6 +200,26 @@ export function App() {
       refresh();
       void invoke<Category[]>("categories_data").then(setCategories).catch((reason: unknown) => setError(String(reason)));
     } catch (reason) { setError(String(reason)); } finally { setRecoveringStore(false); }
+  }
+  async function restoreLocalProfile() {
+    setRecoveringStore(true); setError(null);
+    try {
+      await invoke<ProfileBackupResult>("restore_latest_profile_backup");
+      window.location.reload();
+    } catch (reason) { setError(String(reason)); setRecoveringStore(false); }
+  }
+  async function revokeAndStartFresh() {
+    const canKeepProfile = Boolean(recoveryStatus?.databaseExists && recoveryStatus.databaseReadable);
+    const prompt = canKeepProfile
+      ? `Revoke ${recoveryStatus?.orphanedConnections ?? 0} remote connection(s) missing from this local profile? Existing local accounts and transactions will be preserved.`
+      : "Revoke every recorded remote bank connection and start a new local profile? This stops future synchronization for the old profile. Reconnecting later requires going through the bank connection flow again.";
+    if (!confirm(prompt)) return;
+    setRecoveringStore(true); setError(null);
+    try {
+      await invoke("revoke_orphaned_connections");
+      if (!canKeepProfile) await invoke("reset_unavailable_database");
+      window.location.reload();
+    } catch (reason) { setError(String(reason)); setRecoveringStore(false); }
   }
 
   return <main className="app-shell">
@@ -208,9 +240,10 @@ export function App() {
     <section className="page">
       <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" || view === "scenarios" ? "PLANNING" : view === "investments" ? "PORTFOLIO" : view === "settings" ? "PROFILE" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : view === "investments" ? "Investments" : view === "scenarios" ? "Scenario modeling" : view === "settings" ? "Settings" : "Ledger"}</h1></div>{view !== "scenarios" && view !== "accounts" && view !== "investments" && view !== "settings" ? <button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : "transaction")}>{view === "scheduled" ? "Add schedule" : "Add transaction"}</button> : null}</header>
       {startupSyncing ? <div className="startup-sync" role="status" aria-live="polite"><span className="sync-spinner" /><span><strong>{startupSyncMessage}</strong><small>Your dashboard remains available while the refresh runs.</small></span></div> : null}
-      {!startupSyncing && startupSyncWarning ? <div className="startup-sync warning"><span>!</span><span><strong>Sandbox refresh did not finish.</strong><small>{startupSyncWarning}</small></span></div> : null}
-      {error ? <div className="status error"><strong>Local data store unavailable.</strong><span>{error}</span><p>This file was encrypted with a key that is no longer available on this Windows profile. Starting fresh preserves the unreadable file as an archive and creates a new encrypted store.</p><button disabled={recoveringStore} onClick={() => void recoverLocalStore()}>{recoveringStore ? "Preparing fresh store…" : "Preserve file and start fresh"}</button></div> : null}
-      {!dashboard && !error ? <p className="status">Opening encrypted local data store...</p> : null}
+      {!startupSyncing && startupSyncWarning ? <div className="startup-sync warning"><span>!</span><span><strong>Account refresh did not finish.</strong><small>{startupSyncWarning}</small></span></div> : null}
+      {recoveryStatus?.recoveryRequired ? <section className="recovery-panel" role="alert"><div><p className="eyebrow">PROFILE RECOVERY</p><h2>{recoveryStatus.authorityUnknown ? "Connection authority cannot be verified" : "Remote connections need your decision"}</h2><p>{recoveryStatus.message}</p><small>{recoveryStatus.authorityUnknown ? "Money Map will not create or reset a Production profile while remote authority is unknown." : `${recoveryStatus.orphanedConnections} recorded remote ${recoveryStatus.orphanedConnections === 1 ? "connection" : "connections"}. Money Map has blocked a new bank connection so the existing paid connection cannot be duplicated.`}</small></div><div className="recovery-actions">{recoveryStatus.backupAvailable ? <button className="primary-action" disabled={recoveringStore} onClick={() => void restoreLocalProfile()}>{recoveringStore ? "Restoring…" : "Restore latest encrypted backup"}</button> : null}{!recoveryStatus.authorityUnknown ? <button className="destructive-action" disabled={recoveringStore} onClick={() => void revokeAndStartFresh()}>{recoveringStore ? "Working…" : recoveryStatus.databaseExists && recoveryStatus.databaseReadable ? "Revoke missing connections" : "Revoke old connections and start fresh"}</button> : null}</div><p className="recovery-note">Backups are SQLCipher-encrypted and can be restored only by the same Windows profile that created them.</p></section> : null}
+      {error ? <div className="status error"><strong>Local data store unavailable.</strong><span>{error}</span>{recoveryStatus && !recoveryStatus.recoveryRequired ? <><p>This file cannot be opened by the current Windows profile. The unreadable file will be preserved before a fresh encrypted store is created.</p><button disabled={recoveringStore} onClick={() => void recoverLocalStore()}>{recoveringStore ? "Preparing fresh store…" : "Preserve file and start fresh"}</button></> : null}</div> : null}
+      {!dashboard && !error && !recoveryStatus?.recoveryRequired ? <p className="status">Opening encrypted local data store...</p> : null}
       {dashboard && view === "dashboard" ? <div className="dashboard-grid">
         <Widget title="Net worth" className="net-worth-widget">
           <strong className="big-number">{formatMoney(netWorth)}</strong><p>Across all local accounts</p>
@@ -276,9 +309,32 @@ function InvestmentView({ sandboxEnabled, onOpenSettings }: { sandboxEnabled: bo
 }
 
 function SettingsView({ sandboxEnabled, onOpenInvestments, categories, onCategoryCreated }: { sandboxEnabled: boolean; onOpenInvestments: () => void; categories: Category[]; onCategoryCreated: () => void }) {
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupResult, setBackupResult] = useState<ProfileBackupResult | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const [backups, setBackups] = useState<ProfileBackupSummary[]>([]);
+  const [selectedBackup, setSelectedBackup] = useState("");
+  async function refreshBackups() {
+    const available = await invoke<ProfileBackupSummary[]>("list_profile_backups");
+    setBackups(available);
+    setSelectedBackup(current => available.some(item => item.path === current) ? current : available[0]?.path ?? "");
+  }
+  useEffect(() => { void refreshBackups().catch((reason: unknown) => setBackupError(String(reason))); }, []);
+  async function createBackup() {
+    setBackupBusy(true); setBackupError(null);
+    try { setBackupResult(await invoke<ProfileBackupResult>("export_profile_backup")); await refreshBackups(); }
+    catch (reason) { setBackupError(String(reason)); }
+    finally { setBackupBusy(false); }
+  }
+  async function restoreSelectedBackup() {
+    if (!selectedBackup || !confirm("Restore this encrypted profile backup? Money Map will retain the current profile as a pre-restore archive.")) return;
+    setBackupBusy(true); setBackupError(null);
+    try { await invoke("restore_profile_backup", { backupPath: selectedBackup }); window.location.reload(); }
+    catch (reason) { setBackupError(String(reason)); setBackupBusy(false); }
+  }
   return <div className="settings-grid">
-    <Widget title="External connections" className="settings-connections"><div className="connection-setting"><div><strong>TradeStation</strong><small>Direct read-only OAuth connection for brokerage balances, positions, and market data.</small><p>Client secret and OAuth refresh token remain in the dedicated Cloudflare TradeStation broker. Money Map receives imported investment records only.</p></div>{sandboxEnabled ? <TradeStationSimConnection compact /> : <button className="primary-action" onClick={onOpenInvestments}>View investment setup</button>}</div><div className="connection-setting"><div><strong>Banking and retirement institutions</strong><small>Plaid handles supported accounts, including eligible investment accounts.</small><p>Connect accounts through the Accounts & cards page. Production Plaid setup remains separate from Dev Sandbox.</p></div></div></Widget>
-    <Widget title="Local profile" className="settings-profile"><strong>Money Map profile</strong><p>This desktop profile is local to this Windows user. Financial records are encrypted locally.</p><small>Appearance themes and financial goals will live here.</small></Widget>
+    <Widget title="External connections" className="settings-connections"><div className="connection-setting"><div><strong>TradeStation</strong><small>Direct read-only OAuth connection for brokerage balances, positions, and market data.</small><p>Client secret and OAuth refresh token remain in the dedicated Cloudflare TradeStation broker. Money Map receives imported investment records only.</p></div>{sandboxEnabled ? <TradeStationSimConnection compact /> : <button className="primary-action" onClick={onOpenInvestments}>View investment setup</button>}</div><div className="connection-setting"><div><strong>Banking and retirement institutions</strong><small>Plaid handles supported accounts, including eligible investment accounts.</small><p>Connect and manage supported institutions through Accounts & cards.</p></div></div></Widget>
+    <Widget title="Local profile" className="settings-profile"><strong>Money Map profile</strong><p>This desktop profile is local to this Windows user. Financial records are encrypted locally.</p><div className="settings-backup-actions"><button className="primary-action" disabled={backupBusy} onClick={() => void createBackup()}>{backupBusy ? "Working…" : "Create encrypted backup"}</button>{backups.length ? <><label>Available encrypted backups<select value={selectedBackup} disabled={backupBusy} onChange={event => setSelectedBackup(event.target.value)}>{backups.map(item => <option key={item.path} value={item.path}>{new Date(item.createdAt * 1000).toLocaleString()} · schema {item.sourceSchemaVersion} · Money Map {item.applicationVersion}</option>)}</select></label><button disabled={backupBusy || !selectedBackup} onClick={() => void restoreSelectedBackup()}>Restore selected backup</button></> : <small>No compatible backups are available for this profile.</small>}{backupResult ? <p className="backup-result"><strong>Backup created</strong><span>{backupResult.backupPath}</span></p> : null}{backupError ? <p className="form-error">{backupError}</p> : null}</div><small>Backups remain SQLCipher-encrypted and use the database key protected by this Windows profile. Money Map never deletes backups or pre-restore archives automatically.</small></Widget>
     <Widget title="Categories" className="settings-categories"><CategoryManager categories={categories} onCreated={onCategoryCreated} /></Widget>
   </div>;
 }
@@ -352,13 +408,13 @@ function Accounts({ accounts, connections, sandboxEnabled, syncMessage, selected
       <div className="account-page-actions">
         {connections.length > 0 ? <IconAction label="Sync connected accounts" type="button" disabled={syncing} onClick={onSync}><RefreshCw aria-hidden="true" className={syncing ? "spin" : ""} /></IconAction> : null}
         <IconAction label="Add local account" type="button" onClick={onAdd}><Plus aria-hidden="true" /></IconAction>
-        {sandboxEnabled ? <SandboxLinkButton compact onImported={() => window.location.reload()} /> : null}
+        <PlaidLinkButton sandboxEnabled={sandboxEnabled} compact onImported={() => window.location.reload()} />
       </div>
     </div>
     <div className="account-groups">
       {connections.map(connection => <section className="account-group" key={connection.id}>
         <header className="account-group-header">
-          <span><strong>{connection.institutionName}</strong><small>{connection.accountCount} linked account{connection.accountCount === 1 ? "" : "s"} · {connection.environment}</small></span>
+          <span><strong>{connection.institutionName}</strong><small>{connection.accountCount} linked account{connection.accountCount === 1 ? "" : "s"}{sandboxEnabled ? " · Sandbox" : ""}</small></span>
           <OverflowActions label={`More actions for ${connection.institutionName}`}>
             <button className="overflow-menu-item danger" disabled={syncing} onClick={() => onDisconnect(connection)}><Unplug aria-hidden="true" />Disconnect institution</button>
           </OverflowActions>
@@ -378,35 +434,35 @@ function CategoryManager({ categories, onCreated }: { categories: Category[]; on
   return <div className="category-manager"><p className="empty-copy">Used for manual entries and category suggestions.</p><div className="category-list">{categories.map(category => <span key={category.id}>{category.name}</span>)}</div><form onSubmit={add}><label>Name<input value={name} onChange={event => setName(event.target.value)} required placeholder="Pet care" /></label><button className="secondary-action" type="submit">Add</button>{error ? <p className="form-error">{error}</p> : null}</form></div>;
 }
 
-function SandboxLinkButton({ onImported, compact = false }: { onImported: () => void; compact?: boolean }) {
+function PlaidLinkButton({ sandboxEnabled, onImported, compact = false }: { sandboxEnabled: boolean; onImported: () => void; compact?: boolean }) {
   const [session, setSession] = useState<SandboxLinkSession | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   async function begin() {
     setLoading(true); setMessage(null);
-    try { setSession(await invoke<SandboxLinkSession>("create_plaid_sandbox_link_session")); }
+    try { setSession(await invoke<SandboxLinkSession>("create_plaid_link_session")); }
     catch (reason) { setMessage(String(reason)); setLoading(false); }
   }
   if (session) return <PlaidLinkLauncher compact={compact} session={session} onDone={() => { setSession(null); setLoading(false); onImported(); }} onCancelled={() => { setSession(null); setLoading(false); }} />;
-  if (compact) return <button className="primary-action compact-connect-action" type="button" onClick={() => void begin()} disabled={loading}><Link2 aria-hidden="true" />{loading ? "Preparing…" : "Connect account"}</button>;
-  return <div className="connect-card sandbox-link-card"><span>+</span><strong>{loading ? "Preparing Plaid Link…" : "Connect Sandbox account"}</strong><small>Uses Plaid Link · Sandbox only · no Trial slot</small><button onClick={() => void begin()} disabled={loading}>{loading ? "Working…" : "Open Plaid Link"}</button>{message ? <small className="form-error">{message}</small> : null}</div>;
+  if (compact) return <button className="primary-action compact-connect-action" type="button" onClick={() => void begin()} disabled={loading}><Link2 aria-hidden="true" />{loading ? "Preparing…" : "Connect new account"}</button>;
+  return <div className="connect-card sandbox-link-card"><span>+</span><strong>{loading ? "Preparing secure connection…" : sandboxEnabled ? "Connect Sandbox account" : "Connect new account"}</strong><small>{sandboxEnabled ? "Sandbox connection · no Trial slot" : "Securely connect a financial institution"}</small><button onClick={() => void begin()} disabled={loading}>{loading ? "Working…" : "Connect new account"}</button>{message ? <small className="form-error">{message}</small> : null}</div>;
 }
 
 function DashboardConnectCard({ sandboxEnabled, onImported, onManageAccounts }: { sandboxEnabled: boolean; onImported: () => void; onManageAccounts: () => void }) {
-  if (sandboxEnabled) return <SandboxLinkButton onImported={onImported} />;
-  return <button className="connect-card production-connect-card" onClick={onManageAccounts}><span>+</span><strong>Connect new account</strong><small>Secure account connections are not configured in this build. View account options.</small></button>;
+  void onManageAccounts;
+  return <PlaidLinkButton sandboxEnabled={sandboxEnabled} onImported={onImported} />;
 }
 
 function PlaidLinkLauncher({ session, onDone, onCancelled, compact = false }: { session: SandboxLinkSession; onDone: () => void; onCancelled: () => void; compact?: boolean }) {
-  const [status, setStatus] = useState("Opening Plaid Link…");
+  const [status, setStatus] = useState("Opening secure connection…");
   const completingRef = useRef(false);
   const { open, ready } = usePlaidLink({
     token: session.linkToken,
     onSuccess: async (publicToken, metadata) => {
       completingRef.current = true;
-      setStatus("Importing encrypted Sandbox records…");
+      setStatus("Importing encrypted financial records…");
       try {
-        await invoke<PlaidSyncResult>("complete_plaid_sandbox_link", { input: {
+        await invoke<PlaidSyncResult>("complete_plaid_link", { input: {
           sessionId: session.sessionId, sessionSecret: session.sessionSecret, publicToken,
           institutionId: metadata.institution?.institution_id ?? null, institutionName: metadata.institution?.name ?? null,
           selectedAccountIds: metadata.accounts.map(account => account.id),

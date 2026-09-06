@@ -205,7 +205,7 @@ fn generate() -> Result<PathBuf, String> {
     let result = (|| {
         fs::create_dir(staging.join("backups")).map_err(|error| error.to_string())?;
         create_fixture_database(&staging.join("money-map.db"), &key, &profile_id, &fixture)?;
-        let manifest = RuntimeManifest { rehearsal_profile_id: &profile_id, fixture_id: &fixture.manifest.fixture_id, fixture_format_version: fixture.manifest.fixture_format_version, source_schema_version: 7, expected_target_schema_version: 9, logical_hash: &logical_hash };
+        let manifest = RuntimeManifest { rehearsal_profile_id: &profile_id, fixture_id: &fixture.manifest.fixture_id, fixture_format_version: fixture.manifest.fixture_format_version, source_schema_version: 7, expected_target_schema_version: 10, logical_hash: &logical_hash };
         fs::write(staging.join("manifest.json"), serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
         store_rehearsal_credentials(&key, &fixture)?;
         fs::rename(&staging, &root).map_err(|error| error.to_string())?;
@@ -234,6 +234,10 @@ fn migrate_to_current(connection: &mut Connection, force_failure: bool) -> Resul
     let has_pending: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('transactions') WHERE name='pending')", [], |row| row.get(0)).map_err(|error| error.to_string())?;
     if !has_pending { transaction.execute("ALTER TABLE transactions ADD COLUMN pending INTEGER NOT NULL DEFAULT 0", []).map_err(|error| error.to_string())?; }
     transaction.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES(9)", []).map_err(|error| error.to_string())?;
+    let profile_id: String = transaction.query_row("SELECT profile_id FROM rehearsal_metadata", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+    transaction.execute_batch("CREATE TABLE IF NOT EXISTS profile_metadata(singleton INTEGER PRIMARY KEY NOT NULL CHECK(singleton=1), profile_id TEXT NOT NULL UNIQUE, environment TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);").map_err(|error| error.to_string())?;
+    transaction.execute("INSERT OR IGNORE INTO profile_metadata(singleton, profile_id, environment) VALUES(1, ?1, 'rehearsal')", [profile_id]).map_err(|error| error.to_string())?;
+    transaction.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES(10)", []).map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())
 }
 
@@ -340,7 +344,7 @@ mod tests {
         assert_eq!(connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| row.get::<_, i64>(0)).unwrap(), 7);
         migrate_to_current(&mut connection, false).unwrap();
         migrate_to_current(&mut connection, false).unwrap();
-        assert_eq!(connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| row.get::<_, i64>(0)).unwrap(), 9);
+        assert_eq!(connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| row.get::<_, i64>(0)).unwrap(), 10);
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM transactions WHERE merchant_key IS NOT NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 5);
         drop(connection);
         fs::remove_file(path).unwrap();

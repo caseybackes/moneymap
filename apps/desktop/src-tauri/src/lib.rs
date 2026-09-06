@@ -1,17 +1,18 @@
+mod profile_backup;
+mod recovery_state;
+
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use keyring::Entry;
 use rand::RngCore;
-use rusqlite::{Connection, OptionalExtension};
-#[cfg(feature = "sandbox-dev")]
-use rusqlite::TransactionBehavior;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "sandbox-dev")]
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
+use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 #[cfg(feature = "sandbox-dev")]
-use std::{io::Read, net::TcpListener, process::Command, sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
+use std::{io::Read, net::TcpListener, process::Command, sync::Arc, thread, time::{Duration, Instant}};
 #[cfg(feature = "sandbox-dev")]
 use url::Url;
 
@@ -20,10 +21,21 @@ const KEYRING_SERVICE: &str = "com.caseybackes.moneymap.dev";
 #[cfg(not(feature = "sandbox-dev"))]
 const KEYRING_SERVICE: &str = "com.caseybackes.moneymap";
 const KEYRING_ACCOUNT: &str = "database-key-v2";
+const RECOVERY_REGISTRY_ACCOUNT: &str = "plaid-recovery-registry-v1";
+const PROFILE_ID_ACCOUNT: &str = "profile-identity-v1";
+const PROFILE_LIFECYCLE_ACCOUNT: &str = "profile-lifecycle-v1";
+const PROFILE_BACKUP_DIRECTORY: &str = "Money Map Backups";
+static PROFILE_MAINTENANCE_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(feature = "sandbox-dev")]
 const SANDBOX_BROKER_URL: &str = "https://money-map-plaid-broker.cloud-admin-f91.workers.dev/v1/sandbox/demo-transactions";
 #[cfg(feature = "sandbox-dev")]
-const SANDBOX_BROKER_BASE_URL: &str = "https://money-map-plaid-broker.cloud-admin-f91.workers.dev/v1/sandbox";
+const PLAID_BROKER_BASE_URL: &str = "https://money-map-plaid-broker.cloud-admin-f91.workers.dev/v1/sandbox";
+#[cfg(not(feature = "sandbox-dev"))]
+const PLAID_BROKER_BASE_URL: &str = "https://money-map-plaid-broker-production.cloud-admin-f91.workers.dev/v1";
+#[cfg(feature = "sandbox-dev")]
+const PLAID_ENVIRONMENT: &str = "sandbox";
+#[cfg(not(feature = "sandbox-dev"))]
+const PLAID_ENVIRONMENT: &str = "production";
 #[cfg(feature = "sandbox-dev")]
 const TRADESTATION_SIM_BROKER_BASE_URL: &str = "https://money-map-tradestation-sim-broker.cloud-admin-f91.workers.dev";
 #[cfg(feature = "sandbox-dev")]
@@ -37,6 +49,131 @@ struct DatabaseStatus {
     database_path: String,
     encrypted: bool,
     schema_version: u32,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryConnectionHandle {
+    local_connection_id: String,
+    broker_connection_id: String,
+    connection_secret: String,
+    institution_name: String,
+    environment: String,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryRegistry {
+    version: u32,
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    profile_id: String,
+    environment: String,
+    connections: Vec<RecoveryConnectionHandle>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredLifecycle { NeverInitialized, Initialized, Active, Retired }
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileLifecycleRecord {
+    version: u32,
+    profile_id: String,
+    environment: String,
+    state: StoredLifecycle,
+}
+
+enum LifecycleLoad { Missing, Corrupt, Valid(ProfileLifecycleRecord) }
+enum RegistryLoad { Missing, Corrupt, Valid(RecoveryRegistry) }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoveryStatus {
+    state: String,
+    recovery_required: bool,
+    authority_unknown: bool,
+    database_exists: bool,
+    database_readable: bool,
+    backup_available: bool,
+    orphaned_connections: usize,
+    message: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProfileBackupResult {
+    backup_path: String,
+    created_at: u64,
+}
+
+fn profile_id() -> Result<String, String> {
+    let entry = Entry::new(KEYRING_SERVICE, PROFILE_ID_ACCOUNT).map_err(|error| error.to_string())?;
+    match entry.get_password() {
+        Ok(value) if !value.is_empty() => Ok(value),
+        Ok(_) | Err(keyring::Error::NoEntry) => {
+            let value = format!("profile-{}", new_id());
+            entry.set_password(&value).map_err(|error| error.to_string())?;
+            let persisted = entry.get_password().map_err(|error| error.to_string())?;
+            if persisted != value { return Err("The Money Map profile identity could not be verified after saving.".into()); }
+            Ok(persisted)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn lifecycle_entry() -> Result<Entry, String> {
+    Entry::new(KEYRING_SERVICE, PROFILE_LIFECYCLE_ACCOUNT).map_err(|error| error.to_string())
+}
+
+fn load_lifecycle() -> Result<LifecycleLoad, String> {
+    match lifecycle_entry()?.get_password() {
+        Ok(value) if !value.is_empty() => Ok(match serde_json::from_str(&value) {
+            Ok(record) => LifecycleLoad::Valid(record),
+            Err(_) => LifecycleLoad::Corrupt,
+        }),
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(LifecycleLoad::Missing),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn save_lifecycle(profile_id: &str, state: StoredLifecycle) -> Result<(), String> {
+    let record = ProfileLifecycleRecord { version: 1, profile_id: profile_id.to_string(), environment: PLAID_ENVIRONMENT.to_string(), state };
+    let serialized = serde_json::to_string(&record).map_err(|error| error.to_string())?;
+    lifecycle_entry()?.set_password(&serialized).map_err(|error| error.to_string())
+}
+
+fn lifecycle_evidence(load: &LifecycleLoad) -> recovery_state::Lifecycle {
+    match load {
+        LifecycleLoad::Missing => recovery_state::Lifecycle::Missing,
+        LifecycleLoad::Corrupt => recovery_state::Lifecycle::Corrupt,
+        LifecycleLoad::Valid(record) => match record.state {
+            StoredLifecycle::NeverInitialized => recovery_state::Lifecycle::NeverInitialized,
+            StoredLifecycle::Initialized => recovery_state::Lifecycle::Initialized,
+            StoredLifecycle::Active => recovery_state::Lifecycle::Active,
+            StoredLifecycle::Retired => recovery_state::Lifecycle::Retired,
+        },
+    }
+}
+
+fn ensure_lifecycle(connection: &Connection, identity: &str) -> Result<(), String> {
+    match load_lifecycle()? {
+        LifecycleLoad::Missing => {
+            let count: i64 = connection.query_row("SELECT COUNT(*) FROM plaid_connections WHERE environment = ?1", [PLAID_ENVIRONMENT], |row| row.get(0)).map_err(|error| error.to_string())?;
+            save_lifecycle(identity, if count == 0 { StoredLifecycle::Initialized } else { StoredLifecycle::Active })
+        }
+        LifecycleLoad::Valid(record) if record.version == 1 && record.profile_id == identity && record.environment == PLAID_ENVIRONMENT => {
+            if matches!(record.state, StoredLifecycle::Retired) {
+                save_lifecycle(identity, StoredLifecycle::Initialized)
+            } else {
+                Ok(())
+            }
+        }
+        LifecycleLoad::Valid(_) => Err("The saved profile lifecycle belongs to another profile or environment.".into()),
+        LifecycleLoad::Corrupt => Err("The saved profile lifecycle is corrupt; remote connection authority is unknown.".into()),
+    }
 }
 
 #[derive(Serialize)]
@@ -119,7 +256,6 @@ struct RecurringSuggestion { account_id: String, account_name: String, descripti
 #[serde(rename_all = "camelCase")]
 struct PlaidConnectionInfo { id: String, institution_name: String, environment: String, account_count: i64 }
 
-#[cfg(feature = "sandbox-dev")]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SandboxLinkSession {
@@ -129,7 +265,6 @@ struct SandboxLinkSession {
     expiration: String,
 }
 
-#[cfg(feature = "sandbox-dev")]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PlaidSyncResult {
@@ -138,7 +273,6 @@ struct PlaidSyncResult {
     statuses: Vec<String>,
 }
 
-#[cfg(feature = "sandbox-dev")]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompleteSandboxLinkInput {
@@ -226,6 +360,231 @@ fn database_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(directory.join("money-map.db"))
 }
 
+fn open_existing_database_read_only(app: &AppHandle) -> Result<(Connection, String), String> {
+    let path = app.path().app_local_data_dir().map_err(|error| error.to_string())?
+        .join("money-map.db");
+    if !path.is_file() {
+        return Err("The existing Money Map profile is unavailable.".into());
+    }
+    let key = Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        .map_err(|error| error.to_string())?
+        .get_password()
+        .map_err(|error| format!("The existing Money Map profile key is unavailable: {error}"))?;
+    if key.is_empty() {
+        return Err("The existing Money Map profile key is unavailable.".into());
+    }
+    let connection = open_database_file_read_only(&path, &key)?;
+    Ok((connection, path.display().to_string()))
+}
+
+fn open_database_file_read_only(path: &std::path::Path, key: &str) -> Result<Connection, String> {
+    if !path.is_file() {
+        return Err("The existing Money Map profile is unavailable.".into());
+    }
+    if key.is_empty() {
+        return Err("The existing Money Map profile key is unavailable.".into());
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| error.to_string())?;
+    connection.busy_timeout(std::time::Duration::from_secs(5)).map_err(|error| error.to_string())?;
+    connection.pragma_update(None, "key", &key).map_err(|error| error.to_string())?;
+    connection.pragma_update(None, "query_only", true).map_err(|error| error.to_string())?;
+    connection.query_row("SELECT COUNT(*) FROM sqlite_master", [], |_row| Ok(()))
+        .map_err(|error| format!("The existing Money Map profile could not be read: {error}"))?;
+    Ok(connection)
+}
+
+fn recovery_registry_entry() -> Result<Entry, String> {
+    Entry::new(KEYRING_SERVICE, RECOVERY_REGISTRY_ACCOUNT).map_err(|error| error.to_string())
+}
+
+fn load_recovery_registry() -> Result<RecoveryRegistry, String> {
+    match recovery_registry_entry()?.get_password() {
+        Ok(value) if !value.is_empty() => serde_json::from_str(&value)
+            .map_err(|error| format!("The Production recovery registry is unreadable: {error}")),
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(RecoveryRegistry {
+            version: 1,
+            revision: 0,
+            profile_id: String::new(),
+            environment: PLAID_ENVIRONMENT.to_string(),
+            connections: Vec::new(),
+        }),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn load_recovery_registry_state() -> Result<RegistryLoad, String> {
+    match recovery_registry_entry()?.get_password() {
+        Ok(value) if !value.is_empty() => Ok(match serde_json::from_str(&value) {
+            Ok(registry) => RegistryLoad::Valid(registry),
+            Err(_) => RegistryLoad::Corrupt,
+        }),
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(RegistryLoad::Missing),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn save_recovery_registry(registry: &RecoveryRegistry) -> Result<(), String> {
+    if registry.environment != PLAID_ENVIRONMENT { return Err("Recovery registry environment mismatch.".into()); }
+    let serialized = serde_json::to_string(registry).map_err(|error| error.to_string())?;
+    recovery_registry_entry()?.set_password(&serialized).map_err(|error| error.to_string())
+}
+
+fn journal_remote_authority(handle: RecoveryConnectionHandle) -> Result<(), String> {
+    if PLAID_ENVIRONMENT != "production" { return Ok(()); }
+    let identity = profile_id()?;
+    let mut registry = match load_recovery_registry_state()? {
+        RegistryLoad::Missing => RecoveryRegistry { version: 1, revision: 0, profile_id: identity.clone(), environment: PLAID_ENVIRONMENT.to_string(), connections: Vec::new() },
+        RegistryLoad::Valid(value) if value.environment == PLAID_ENVIRONMENT && (value.profile_id.is_empty() || value.profile_id == identity) => value,
+        RegistryLoad::Valid(_) | RegistryLoad::Corrupt => return Err("Production recovery authority is corrupt or belongs to another profile.".into()),
+    };
+    if !registry.connections.iter().any(|value| recovery_handle_matches(value, &handle)) {
+        registry.connections.push(handle);
+    }
+    registry.version = 1;
+    registry.revision = registry.revision.saturating_add(1);
+    registry.profile_id = identity.clone();
+    save_recovery_registry(&registry)?;
+    save_lifecycle(&identity, StoredLifecycle::Active)
+}
+
+fn database_recovery_handles(connection: &Connection) -> Result<Vec<RecoveryConnectionHandle>, String> {
+    let mut statement = connection.prepare(
+        "SELECT id, broker_connection_id, connection_secret, institution_name, environment
+         FROM plaid_connections WHERE environment = ?1 ORDER BY created_at",
+    ).map_err(|error| error.to_string())?;
+    let handles = statement.query_map([PLAID_ENVIRONMENT], |row| Ok(RecoveryConnectionHandle {
+        local_connection_id: row.get(0)?,
+        broker_connection_id: row.get(1)?,
+        connection_secret: row.get(2)?,
+        institution_name: row.get(3)?,
+        environment: row.get(4)?,
+    })).map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok(handles)
+}
+
+fn refresh_recovery_registry(connection: &Connection, allow_empty: bool) -> Result<(), String> {
+    if PLAID_ENVIRONMENT != "production" {
+        return Ok(());
+    }
+    let connections = database_recovery_handles(connection)?;
+    if connections.is_empty() && !allow_empty && !load_recovery_registry()?.connections.is_empty() {
+        return Ok(());
+    }
+    let identity = profile_id()?;
+    let previous = load_recovery_registry()?;
+    save_recovery_registry(&RecoveryRegistry {
+        version: 1,
+        revision: previous.revision.saturating_add(1),
+        profile_id: identity.clone(),
+        environment: PLAID_ENVIRONMENT.to_string(),
+        connections,
+    })?;
+    save_lifecycle(&identity, if database_recovery_handles(connection)?.is_empty() { StoredLifecycle::Initialized } else { StoredLifecycle::Active })
+}
+
+fn orphaned_registry_connections(
+    registry_connections: &[RecoveryConnectionHandle],
+    database_connections: &[RecoveryConnectionHandle],
+) -> Vec<RecoveryConnectionHandle> {
+    registry_connections.iter()
+        .filter(|registered| {
+            !database_connections
+                .iter()
+                .any(|local| recovery_handle_matches(registered, local))
+        })
+        .cloned()
+        .collect()
+}
+
+struct RecoveryAssessment {
+    decision: recovery_state::Decision,
+    orphaned: Vec<RecoveryConnectionHandle>,
+}
+
+fn assess_recovery(database: recovery_state::DatabaseEvidence, connection: Option<&Connection>) -> Result<RecoveryAssessment, String> {
+    if PLAID_ENVIRONMENT != "production" {
+        return Ok(RecoveryAssessment { decision: recovery_state::Decision::Healthy, orphaned: Vec::new() });
+    }
+    let lifecycle_load = load_lifecycle()?;
+    let registry_load = load_recovery_registry_state()?;
+    let identity = Entry::new(KEYRING_SERVICE, PROFILE_ID_ACCOUNT).map_err(|error| error.to_string())?.get_password().ok().filter(|value| !value.is_empty());
+    let lifecycle = match &lifecycle_load {
+        LifecycleLoad::Valid(record) if record.version != 1 || record.environment != PLAID_ENVIRONMENT || identity.as_deref() != Some(record.profile_id.as_str()) => recovery_state::Lifecycle::Corrupt,
+        _ => lifecycle_evidence(&lifecycle_load),
+    };
+    let database_handles = match connection { Some(value) => database_recovery_handles(value)?, None => Vec::new() };
+    let (registry_evidence, registry_handles, registry_identity_valid) = match &registry_load {
+        RegistryLoad::Missing => (recovery_state::RegistryEvidence::Missing, Vec::new(), true),
+        RegistryLoad::Corrupt => (recovery_state::RegistryEvidence::Corrupt, Vec::new(), false),
+        RegistryLoad::Valid(registry) => {
+            let identity_valid = registry.environment == PLAID_ENVIRONMENT
+                && (registry.profile_id.is_empty() || identity.as_deref() == Some(registry.profile_id.as_str()));
+            (if identity_valid { recovery_state::RegistryEvidence::Valid } else { recovery_state::RegistryEvidence::Corrupt }, registry.connections.clone(), identity_valid)
+        }
+    };
+    let orphaned = orphaned_registry_connections(&registry_handles, &database_handles);
+    let database_ahead = database_handles.iter().any(|local| !registry_handles.iter().any(|registered| recovery_handle_matches(registered, local)));
+    let registry_ahead = !orphaned.is_empty();
+    let decision = recovery_state::evaluate(
+        lifecycle,
+        database,
+        registry_evidence,
+        database_handles.len(),
+        registry_handles.len(),
+        database_ahead || !registry_identity_valid,
+        registry_ahead,
+    );
+    Ok(RecoveryAssessment { decision, orphaned })
+}
+
+fn recovery_handle_matches(
+    registered: &RecoveryConnectionHandle,
+    local: &RecoveryConnectionHandle,
+) -> bool {
+    local.broker_connection_id == registered.broker_connection_id
+        && local.connection_secret == registered.connection_secret
+        && local.environment == registered.environment
+}
+
+fn backup_directory(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let documents = app.path().document_dir().map_err(|error| error.to_string())?;
+    Ok(documents.join(PROFILE_BACKUP_DIRECTORY))
+}
+
+fn latest_backup_path(app: &AppHandle) -> Result<Option<std::path::PathBuf>, String> {
+    let directory = backup_directory(app)?;
+    let key = database_key(true)?;
+    let identity = profile_id()?;
+    Ok(profile_backup::list_backups(&directory, &key, &identity, PLAID_ENVIRONMENT)?
+        .first().map(|backup| std::path::PathBuf::from(&backup.path)))
+}
+
+fn validate_runtime_environment() -> Result<(), String> {
+    let production_url = PLAID_BROKER_BASE_URL.contains("production") && !PLAID_BROKER_BASE_URL.contains("/sandbox");
+    let sandbox_url = PLAID_BROKER_BASE_URL.contains("/sandbox");
+    match PLAID_ENVIRONMENT {
+        "production" if production_url => Ok(()),
+        "sandbox" if sandbox_url => Ok(()),
+        _ => Err(format!("Money Map refused to start because its {PLAID_ENVIRONMENT} build points at an incompatible connection broker.")),
+    }
+}
+
+fn lost_remote_state(connection: Option<&Connection>) -> Result<Vec<RecoveryConnectionHandle>, String> {
+    if PLAID_ENVIRONMENT != "production" {
+        return Ok(Vec::new());
+    }
+    let assessment = assess_recovery(
+        if connection.is_some() { recovery_state::DatabaseEvidence::Readable } else { recovery_state::DatabaseEvidence::Missing },
+        connection,
+    )?;
+    if assessment.decision == recovery_state::Decision::UnknownAuthority {
+        return Err("Money Map cannot prove that Production remote connection authority is clear. Restore a profile backup or recover the saved connection registry before creating or resetting a profile.".into());
+    }
+    Ok(assessment.orphaned)
+}
+
 #[cfg(feature = "sandbox-dev")]
 fn remove_sandbox_database(path: &std::path::Path) {
     let mut targets = vec![path.to_path_buf()];
@@ -265,10 +624,32 @@ fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
 
 fn open_database_inner(app: &AppHandle) -> Result<(Connection, String), String> {
     let path = database_path(app)?;
-    let key = database_key(path.exists())?;
+    let existed_before_open = path.exists();
+    let key = database_key(existed_before_open)?;
     let connection = Connection::open(&path).map_err(|error| error.to_string())?;
     connection.busy_timeout(std::time::Duration::from_secs(5)).map_err(|error| error.to_string())?;
     connection.pragma_update(None, "key", &key).map_err(|error| error.to_string())?;
+    if existed_before_open {
+        let has_migrations: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations')",
+            [],
+            |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if has_migrations {
+            let prior_version: u32 = connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+            if prior_version < profile_backup::CURRENT_SCHEMA_VERSION {
+                let identity = profile_id()?;
+                profile_backup::create_backup(
+                    &connection,
+                    &key,
+                    &backup_directory(app)?,
+                    &identity,
+                    PLAID_ENVIRONMENT,
+                    env!("CARGO_PKG_VERSION"),
+                ).map_err(|error| format!("Money Map could not create the required pre-migration backup: {error}"))?;
+            }
+        }
+    }
     connection.execute_batch(
         "PRAGMA cipher_memory_security = ON;
          PRAGMA foreign_keys = ON;
@@ -425,6 +806,10 @@ fn open_database_inner(app: &AppHandle) -> Result<(Connection, String), String> 
     }
     connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)", [])
         .map_err(|error| error.to_string())?;
+    let identity = profile_id()?;
+    profile_backup::ensure_profile_metadata(&connection, &identity, PLAID_ENVIRONMENT)?;
+    connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (10)", []).map_err(|error| error.to_string())?;
+    ensure_lifecycle(&connection, &identity)?;
     Ok((connection, path.display().to_string()))
 }
 
@@ -433,6 +818,10 @@ fn open_database_inner(app: &AppHandle) -> Result<(Connection, String), String> 
 /// forensic recovery; this command never deletes the prior file.
 #[tauri::command]
 fn reset_unavailable_database(app: AppHandle) -> Result<DatabaseStatus, String> {
+    validate_runtime_environment()?;
+    if !lost_remote_state(None)?.is_empty() {
+        return Err("Money Map will not create a fresh Production profile while remote financial connections still exist. Restore the latest encrypted backup or explicitly revoke those connections first.".into());
+    }
     let path = database_path(&app)?;
     if path.exists() {
         let timestamp = std::time::SystemTime::now()
@@ -458,11 +847,210 @@ fn reset_unavailable_database(app: AppHandle) -> Result<DatabaseStatus, String> 
 
 #[tauri::command]
 fn database_status(app: AppHandle) -> Result<DatabaseStatus, String> {
+    validate_runtime_environment()?;
     let (connection, path) = open_database(&app)?;
     let schema_version: u32 = connection
         .query_row("SELECT max(version) FROM schema_migrations", [], |row| row.get(0))
         .map_err(|error| error.to_string())?;
     Ok(DatabaseStatus { database_path: path, encrypted: true, schema_version })
+}
+
+#[tauri::command]
+fn recovery_status(app: AppHandle) -> Result<RecoveryStatus, String> {
+    validate_runtime_environment()?;
+    let path = database_path(&app)?;
+    let database_exists = path.exists();
+    let backup_available = latest_backup_path(&app).ok().flatten().is_some();
+    let mut database_readable = false;
+    let assessment = if database_exists {
+        match open_database(&app) {
+            Ok((connection, _)) => {
+                database_readable = true;
+                let result = assess_recovery(recovery_state::DatabaseEvidence::Readable, Some(&connection))?;
+                if result.decision == recovery_state::Decision::RepairRegistry {
+                    refresh_recovery_registry(&connection, false)?;
+                    assess_recovery(recovery_state::DatabaseEvidence::Readable, Some(&connection))?
+                } else {
+                    result
+                }
+            }
+            Err(_) => assess_recovery(recovery_state::DatabaseEvidence::Unreadable, None)?,
+        }
+    } else {
+        assess_recovery(recovery_state::DatabaseEvidence::Missing, None)?
+    };
+    let state = match assessment.decision {
+        recovery_state::Decision::FirstRun => "first_run",
+        recovery_state::Decision::Healthy => "healthy",
+        recovery_state::Decision::RepairRegistry => "registry_repair",
+        recovery_state::Decision::OrphanedRemoteAuthority => "orphaned_remote_authority",
+        recovery_state::Decision::LostLocalState => "lost_local_state",
+        recovery_state::Decision::UnknownAuthority => "unknown_authority",
+        recovery_state::Decision::Retired => "retired",
+    }.to_string();
+    let recovery_required = PLAID_ENVIRONMENT == "production" && assessment.decision.blocks_new_connection();
+    let authority_unknown = assessment.decision == recovery_state::Decision::UnknownAuthority;
+    let message = match assessment.decision {
+        recovery_state::Decision::OrphanedRemoteAuthority | recovery_state::Decision::LostLocalState => format!(
+            "Money Map found {} remote financial connection(s) that are not represented by a readable local profile. Restore an encrypted backup or revoke those connections before connecting another institution.",
+            assessment.orphaned.len()
+        ),
+        recovery_state::Decision::UnknownAuthority => "Money Map cannot prove that Production remote connection authority is clear. A new connection and destructive reset are blocked until a valid profile backup or recovery registry restores that evidence.".to_string(),
+        recovery_state::Decision::FirstRun => "Money Map is ready to create its first local profile.".to_string(),
+        recovery_state::Decision::Retired => "The prior profile was explicitly retired and has no recorded remote authority.".to_string(),
+        _ => "The local profile and remote connection registry are consistent.".to_string(),
+    };
+
+    Ok(RecoveryStatus {
+        state,
+        recovery_required,
+        authority_unknown,
+        database_exists,
+        database_readable,
+        backup_available,
+        orphaned_connections: assessment.orphaned.len(),
+        message,
+    })
+}
+
+fn ensure_new_connection_allowed(app: &AppHandle) -> Result<(), String> {
+    let status = recovery_status(app.clone())?;
+    if status.recovery_required {
+        return Err(status.message);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn export_profile_backup(app: AppHandle) -> Result<ProfileBackupResult, String> {
+    validate_runtime_environment()?;
+    let _maintenance = PROFILE_MAINTENANCE_LOCK.lock().map_err(|_| "Profile maintenance lock is unavailable.".to_string())?;
+    let (connection, path_string) = open_database(&app)?;
+    refresh_recovery_registry(&connection, false)?;
+    let key = database_key(true)?;
+    let identity = profile_id()?;
+    profile_backup::ensure_profile_metadata(&connection, &identity, PLAID_ENVIRONMENT)?;
+    let backup = profile_backup::create_backup(
+        &connection,
+        &key,
+        &backup_directory(&app)?,
+        &identity,
+        PLAID_ENVIRONMENT,
+        env!("CARGO_PKG_VERSION"),
+    )?;
+    write_diagnostic(&app, &format!("encrypted profile backup created path={}", backup.path));
+    let _ = path_string;
+    Ok(ProfileBackupResult { backup_path: backup.path, created_at: backup.created_at })
+}
+
+#[tauri::command]
+fn restore_latest_profile_backup(app: AppHandle) -> Result<DatabaseStatus, String> {
+    validate_runtime_environment()?;
+    let backup = latest_backup_path(&app)?.ok_or("No encrypted Money Map backup is available on this Windows profile.")?;
+    restore_profile_backup_inner(&app, &backup)
+}
+
+#[tauri::command]
+fn list_profile_backups(app: AppHandle) -> Result<Vec<profile_backup::BackupSummary>, String> {
+    validate_runtime_environment()?;
+    let key = database_key(true)?;
+    let identity = profile_id()?;
+    profile_backup::list_backups(&backup_directory(&app)?, &key, &identity, PLAID_ENVIRONMENT)
+}
+
+#[tauri::command]
+fn restore_profile_backup(app: AppHandle, backup_path: String) -> Result<DatabaseStatus, String> {
+    validate_runtime_environment()?;
+    let requested = std::path::PathBuf::from(backup_path);
+    let directory = backup_directory(&app)?;
+    if requested.parent() != Some(directory.as_path()) {
+        return Err("Money Map restores backups only from its configured backup directory.".into());
+    }
+    restore_profile_backup_inner(&app, &requested)
+}
+
+fn restore_profile_backup_inner(app: &AppHandle, backup: &std::path::Path) -> Result<DatabaseStatus, String> {
+    let _maintenance = PROFILE_MAINTENANCE_LOCK.lock().map_err(|_| "Profile maintenance lock is unavailable.".to_string())?;
+    let key = database_key(true)?;
+    let identity = profile_id()?;
+    let path = database_path(&app)?;
+    if path.exists() {
+        if let Ok((connection, _)) = open_existing_database_read_only(app) {
+            drop(connection);
+            let writable = Connection::open(&path).map_err(|error| error.to_string())?;
+            writable.pragma_update(None, "key", &key).map_err(|error| error.to_string())?;
+            writable.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").map_err(|error| error.to_string())?;
+        }
+    }
+    let archive = profile_backup::restore_backup(backup, &path, &key, &identity, PLAID_ENVIRONMENT)?;
+    let (connection, database_path) = open_database(&app)?;
+    refresh_recovery_registry(&connection, false)?;
+    let schema_version = connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    write_diagnostic(app, &format!("encrypted profile restored backup={} archive={}", backup.display(), archive.display()));
+    Ok(DatabaseStatus { database_path, encrypted: true, schema_version })
+}
+
+#[tauri::command]
+async fn revoke_orphaned_connections(app: AppHandle) -> Result<usize, String> {
+    validate_runtime_environment()?;
+    let registry = load_recovery_registry()?;
+    if registry.environment != PLAID_ENVIRONMENT {
+        return Err("The saved recovery registry belongs to a different Money Map environment.".into());
+    }
+    let path = database_path(&app)?;
+    let (database_handles, database_readable) = if path.exists() {
+        match open_database(&app).ok().and_then(|(connection, _)| database_recovery_handles(&connection).ok()) {
+            Some(handles) => (handles, true),
+            None => (Vec::new(), false),
+        }
+    } else {
+        (Vec::new(), false)
+    };
+    let handles = orphaned_registry_connections(&registry.connections, &database_handles);
+    let attempted = handles.len();
+    let remaining = tauri::async_runtime::spawn_blocking(move || {
+        let mut remaining = Vec::new();
+        for handle in handles {
+            if broker_post_empty(&format!("connections/{}/disconnect", handle.broker_connection_id), &handle.connection_secret).is_err() {
+                remaining.push(handle);
+            }
+        }
+        remaining
+    }).await.map_err(|error| error.to_string())?;
+    if !remaining.is_empty() {
+        let mut preserved = registry.connections.into_iter()
+            .filter(|registered| {
+                database_handles
+                    .iter()
+                    .any(|local| recovery_handle_matches(registered, local))
+            })
+            .collect::<Vec<_>>();
+        preserved.extend(remaining);
+        save_recovery_registry(&RecoveryRegistry { version: 1, revision: registry.revision.saturating_add(1), profile_id: registry.profile_id.clone(), environment: PLAID_ENVIRONMENT.to_string(), connections: preserved })?;
+        return Err("At least one remote connection could not be revoked. Money Map preserved its recovery handle and will continue blocking a replacement connection.".into());
+    }
+    save_recovery_registry(&RecoveryRegistry {
+        version: 1,
+        revision: registry.revision.saturating_add(1),
+        profile_id: registry.profile_id.clone(),
+        environment: PLAID_ENVIRONMENT.to_string(),
+        connections: registry.connections.into_iter()
+            .filter(|registered| {
+                database_handles
+                    .iter()
+                    .any(|local| recovery_handle_matches(registered, local))
+            })
+            .collect(),
+    })?;
+    let identity = profile_id()?;
+    save_lifecycle(&identity, if database_readable {
+        if database_handles.is_empty() { StoredLifecycle::Initialized } else { StoredLifecycle::Active }
+    } else {
+        StoredLifecycle::Retired
+    })?;
+    write_diagnostic(&app, &format!("revoked {attempted} orphaned remote connection(s)"));
+    Ok(attempted)
 }
 
 #[tauri::command]
@@ -733,35 +1321,31 @@ fn skip_schedule_occurrence(app: AppHandle, schedule_id: String) -> Result<Strin
     process_schedule(app, schedule_id, false)
 }
 
-#[cfg(feature = "sandbox-dev")]
 fn broker_post(path: &str, body: Value, connection_secret: Option<&str>) -> Result<Value, String> {
     let client = reqwest::blocking::Client::new();
-    let mut request = client.post(format!("{SANDBOX_BROKER_BASE_URL}/{path}")).json(&body);
+    let mut request = client.post(format!("{PLAID_BROKER_BASE_URL}/{path}")).json(&body);
     if let Some(secret) = connection_secret {
         request = request.header("x-money-map-connection-key", secret);
     }
     let response = request.send().map_err(|error| format!("Could not reach the Money Map broker: {error}"))?;
     if !response.status().is_success() {
-        return Err(format!("Sandbox broker request failed ({})", response.status()));
+        return Err(format!("Plaid broker request failed ({})", response.status()));
     }
-    response.json().map_err(|error| format!("Sandbox broker response was invalid: {error}"))
+    response.json().map_err(|error| format!("Plaid broker response was invalid: {error}"))
 }
 
-#[cfg(feature = "sandbox-dev")]
 fn broker_post_empty(path: &str, connection_secret: &str) -> Result<(), String> {
-    let response = reqwest::blocking::Client::new().post(format!("{SANDBOX_BROKER_BASE_URL}/{path}"))
+    let response = reqwest::blocking::Client::new().post(format!("{PLAID_BROKER_BASE_URL}/{path}"))
         .header("x-money-map-connection-key", connection_secret)
         .send().map_err(|error| format!("Could not reach the Money Map broker: {error}"))?;
-    if !response.status().is_success() { return Err(format!("Sandbox broker request failed ({})", response.status())); }
+    if !response.status().is_success() { return Err(format!("Plaid broker request failed ({})", response.status())); }
     Ok(())
 }
 
-#[cfg(feature = "sandbox-dev")]
 fn cents(value: &Value) -> Option<i64> {
     value.as_f64().map(|amount| (amount * 100.0).round() as i64)
 }
 
-#[cfg(feature = "sandbox-dev")]
 fn selected_account_fingerprint(account_ids: &[String]) -> Option<String> {
     let mut ids: Vec<&str> = account_ids.iter().map(String::as_str).filter(|id| !id.trim().is_empty()).collect();
     ids.sort_unstable();
@@ -769,7 +1353,6 @@ fn selected_account_fingerprint(account_ids: &[String]) -> Option<String> {
     (!ids.is_empty()).then(|| ids.join("|"))
 }
 
-#[cfg(feature = "sandbox-dev")]
 fn existing_selected_connection(
     connection: &Connection,
     institution_id: Option<&str>,
@@ -779,20 +1362,18 @@ fn existing_selected_connection(
     if institution_id.trim().is_empty() { return Ok(None); }
     connection.query_row(
         "SELECT id FROM plaid_connections
-         WHERE environment = 'sandbox' AND institution_id = ?1 AND selected_account_fingerprint = ?2
+         WHERE environment = ?1 AND institution_id = ?2 AND selected_account_fingerprint = ?3
          LIMIT 1",
-        (institution_id, selected_fingerprint),
+        (PLAID_ENVIRONMENT, institution_id, selected_fingerprint),
         |row| row.get(0),
     ).optional().map_err(|error| error.to_string())
 }
 
-#[cfg(feature = "sandbox-dev")]
 fn apply_plaid_sync(app: &AppHandle, local_connection_id: &str, payload: &Value) -> Result<usize, String> {
     let (mut connection, _) = open_database(app)?;
     apply_plaid_sync_connection(&mut connection, local_connection_id, payload)
 }
 
-#[cfg(feature = "sandbox-dev")]
 fn plaid_sync_result(changed: usize, payloads: &[Value]) -> PlaidSyncResult {
     let pending_connections = payloads.iter()
         .filter(|payload| payload["syncState"]["pending"].as_bool().unwrap_or(false))
@@ -803,9 +1384,16 @@ fn plaid_sync_result(changed: usize, payloads: &[Value]) -> PlaidSyncResult {
     PlaidSyncResult { changed, pending_connections, statuses }
 }
 
-#[cfg(feature = "sandbox-dev")]
 fn apply_plaid_sync_connection(connection: &mut Connection, local_connection_id: &str, payload: &Value) -> Result<usize, String> {
-    let institution = payload["connection"]["institutionName"].as_str().unwrap_or("Plaid Sandbox institution");
+    let institution = payload["connection"]["institutionName"].as_str().unwrap_or("Plaid institution");
+    let selected_fingerprint: Option<String> = connection.query_row(
+        "SELECT selected_account_fingerprint FROM plaid_connections WHERE id = ?1",
+        [local_connection_id],
+        |row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?.flatten();
+    let allowed_external_account_ids = selected_fingerprint.map(|value| {
+        value.split('|').filter(|id| !id.is_empty()).map(str::to_owned).collect::<std::collections::HashSet<_>>()
+    });
     // Sync can be triggered by startup and a user action at nearly the same time.
     // Taking the write lock before reading account links makes the whole import
     // atomic; the second caller waits rather than creating a parallel account.
@@ -814,6 +1402,7 @@ fn apply_plaid_sync_connection(connection: &mut Connection, local_connection_id:
     let balance_fetched_at = payload["balanceFetchedAt"].as_str();
     for account in payload["accounts"].as_array().ok_or("Sandbox response has no accounts.")? {
         let external_account_id = account["account_id"].as_str().ok_or("Sandbox account has no id.")?;
+        if allowed_external_account_ids.as_ref().is_some_and(|allowed| !allowed.contains(external_account_id)) { continue; }
         let name = account["name"].as_str().unwrap_or("Plaid account");
         let plaid_account_type = account["type"].as_str();
         let plaid_account_subtype = account["subtype"].as_str();
@@ -915,23 +1504,31 @@ fn apply_plaid_sync_connection(connection: &mut Connection, local_connection_id:
     Ok(imported)
 }
 
-#[cfg(feature = "sandbox-dev")]
 #[tauri::command]
-async fn create_plaid_sandbox_link_session() -> Result<SandboxLinkSession, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+async fn create_plaid_link_session(app: AppHandle) -> Result<SandboxLinkSession, String> {
+    validate_runtime_environment()?;
+    ensure_new_connection_allowed(&app)?;
+    write_diagnostic(&app, &format!("connection session requested environment={PLAID_ENVIRONMENT}"));
+    let result = tauri::async_runtime::spawn_blocking(|| {
         let payload = broker_post("link-token", Value::Object(Default::default()), None)?;
         Ok(SandboxLinkSession {
-            link_token: payload["linkToken"].as_str().ok_or("Sandbox broker returned no Link token.")?.to_owned(),
-            session_id: payload["sessionId"].as_str().ok_or("Sandbox broker returned no session id.")?.to_owned(),
-            session_secret: payload["sessionSecret"].as_str().ok_or("Sandbox broker returned no session key.")?.to_owned(),
+            link_token: payload["linkToken"].as_str().ok_or("Plaid broker returned no Link token.")?.to_owned(),
+            session_id: payload["sessionId"].as_str().ok_or("Plaid broker returned no session id.")?.to_owned(),
+            session_secret: payload["sessionSecret"].as_str().ok_or("Plaid broker returned no session key.")?.to_owned(),
             expiration: payload["expiration"].as_str().unwrap_or_default().to_owned(),
         })
-    }).await.map_err(|error| error.to_string())?
+    }).await.map_err(|error| error.to_string())?;
+    match &result {
+        Ok(session) => write_diagnostic(&app, &format!("connection session created session_id={}", session.session_id)),
+        Err(error) => write_diagnostic(&app, &format!("connection session failed error={error}")),
+    }
+    result
 }
 
-#[cfg(feature = "sandbox-dev")]
 #[tauri::command]
-async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkInput) -> Result<PlaidSyncResult, String> {
+async fn complete_plaid_link(app: AppHandle, input: CompleteSandboxLinkInput) -> Result<PlaidSyncResult, String> {
+    write_diagnostic(&app, &format!("connection completion received session_id={}", input.session_id));
+    ensure_new_connection_allowed(&app)?;
     let selected_fingerprint = selected_account_fingerprint(&input.selected_account_ids);
     let existing = {
         let (connection, _) = open_database(&app)?;
@@ -967,17 +1564,35 @@ async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkI
             "institution": { "institution_id": institution_id, "name": institution_name_input }
         }), None)
     }).await.map_err(|error| error.to_string())??;
-    let broker_connection_id = broker_response["connection"]["id"].as_str().ok_or("Sandbox broker returned no connection id.")?;
-    let connection_secret = broker_response["connection"]["connectionSecret"].as_str().ok_or("Sandbox broker returned no connection key.")?;
-    let institution_name = broker_response["connection"]["institutionName"].as_str().unwrap_or("Plaid Sandbox institution");
+    let broker_connection_id = broker_response["connection"]["id"].as_str().ok_or("Plaid broker returned no connection id.")?;
+    let connection_secret = broker_response["connection"]["connectionSecret"].as_str().ok_or("Plaid broker returned no connection key.")?;
+    let institution_name = broker_response["connection"]["institutionName"].as_str().unwrap_or("Plaid institution");
     let (connection, _) = open_database(&app)?;
     let local_connection_id = new_id();
+    let recovery_handle = RecoveryConnectionHandle {
+        local_connection_id: local_connection_id.clone(),
+        broker_connection_id: broker_connection_id.to_string(),
+        connection_secret: connection_secret.to_string(),
+        institution_name: institution_name.to_string(),
+        environment: PLAID_ENVIRONMENT.to_string(),
+    };
+    if let Err(journal_error) = journal_remote_authority(recovery_handle) {
+        let id = broker_connection_id.to_string();
+        let secret = connection_secret.to_string();
+        let compensation = tauri::async_runtime::spawn_blocking(move || broker_post_empty(&format!("connections/{id}/disconnect"), &secret))
+            .await.map_err(|error| error.to_string())?;
+        return Err(match compensation {
+            Ok(()) => format!("Money Map could not persist recovery authority, so the new remote connection was revoked: {journal_error}"),
+            Err(_) => format!("Money Map could not persist recovery authority or confirm revocation. Retry this same Link completion before starting another connection: {journal_error}"),
+        });
+    }
     connection.execute(
         "INSERT INTO plaid_connections(
            id, broker_connection_id, connection_secret, institution_name, environment, institution_id, selected_account_fingerprint)
-         VALUES(?1, ?2, ?3, ?4, 'sandbox', ?5, ?6)",
-        (&local_connection_id, broker_connection_id, connection_secret, institution_name, input.institution_id.as_deref(), selected_fingerprint.as_deref()),
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        (&local_connection_id, broker_connection_id, connection_secret, institution_name, PLAID_ENVIRONMENT, input.institution_id.as_deref(), selected_fingerprint.as_deref()),
     ).map_err(|error| error.to_string())?;
+    refresh_recovery_registry(&connection, false)?;
     let _ = (session_id, session_secret); // The completion request consumes this one-time session at the broker.
     let payload = tauri::async_runtime::spawn_blocking({
         let id = broker_connection_id.to_owned();
@@ -988,14 +1603,13 @@ async fn complete_plaid_sandbox_link(app: AppHandle, input: CompleteSandboxLinkI
     Ok(plaid_sync_result(changed, &[payload]))
 }
 
-#[cfg(feature = "sandbox-dev")]
 #[tauri::command]
-async fn sync_plaid_sandbox_connections(app: AppHandle) -> Result<PlaidSyncResult, String> {
+async fn sync_plaid_connections(app: AppHandle) -> Result<PlaidSyncResult, String> {
     let connections = {
         let (connection, _) = open_database(&app)?;
-        let mut statement = connection.prepare("SELECT id, broker_connection_id, connection_secret FROM plaid_connections WHERE environment = 'sandbox'")
+        let mut statement = connection.prepare("SELECT id, broker_connection_id, connection_secret FROM plaid_connections WHERE environment = ?1")
             .map_err(|error| error.to_string())?;
-        let records = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+        let records = statement.query_map([PLAID_ENVIRONMENT], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
             .map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
         records
     };
@@ -1022,8 +1636,9 @@ fn plaid_connections_data(app: AppHandle) -> Result<Vec<PlaidConnectionInfo>, St
 }
 
 #[tauri::command]
-fn app_capabilities() -> AppCapabilities {
-    AppCapabilities { sandbox_enabled: cfg!(feature = "sandbox-dev") }
+fn app_capabilities() -> Result<AppCapabilities, String> {
+    validate_runtime_environment()?;
+    Ok(AppCapabilities { sandbox_enabled: cfg!(feature = "sandbox-dev") })
 }
 
 #[cfg(feature = "sandbox-dev")]
@@ -1180,22 +1795,21 @@ async fn start_tradestation_sim_connection(app: AppHandle, state: tauri::State<'
     Ok(())
 }
 
-#[cfg(feature = "sandbox-dev")]
 #[tauri::command]
-async fn disconnect_plaid_sandbox_connection(app: AppHandle, connection_id: String) -> Result<(), String> {
+async fn disconnect_plaid_connection(app: AppHandle, connection_id: String) -> Result<(), String> {
     let local = {
         let (connection, _) = open_database(&app)?;
-        connection.query_row("SELECT broker_connection_id, connection_secret FROM plaid_connections WHERE id = ?1 AND environment = 'sandbox'", [&connection_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        connection.query_row("SELECT broker_connection_id, connection_secret FROM plaid_connections WHERE id = ?1 AND environment = ?2", (&connection_id, PLAID_ENVIRONMENT), |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
             .optional().map_err(|error| error.to_string())?
     }.ok_or("Connected account is no longer available.")?;
     let (broker_id, secret) = local;
     tauri::async_runtime::spawn_blocking(move || broker_post_empty(&format!("connections/{broker_id}/disconnect"), &secret))
         .await.map_err(|error| error.to_string())??;
     let (mut connection, _) = open_database(&app)?;
-    remove_plaid_connection_local(&mut connection, &connection_id)
+    remove_plaid_connection_local(&mut connection, &connection_id)?;
+    refresh_recovery_registry(&connection, true)
 }
 
-#[cfg(feature = "sandbox-dev")]
 fn remove_plaid_connection_local(connection: &mut Connection, connection_id: &str) -> Result<(), String> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     let account_ids = {
@@ -1259,7 +1873,7 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(TradeStationOAuthState::default())
-        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_sandbox_link_session, complete_plaid_sandbox_link, sync_plaid_sandbox_connections, plaid_connections_data, disconnect_plaid_sandbox_connection, save_tradestation_sim_setup_key, tradestation_sim_connection_status, start_tradestation_sim_connection])
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_link_session, complete_plaid_link, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection, save_tradestation_sim_setup_key, tradestation_sim_connection_status, start_tradestation_sim_connection])
         .build(tauri::generate_context!())
         .expect("error while building Money Map Dev");
 
@@ -1490,6 +2104,48 @@ mod plaid_sync_tests {
         assert_eq!(groceries, -4250);
     }
 
+    fn recovery_handle(id: &str, secret: &str) -> RecoveryConnectionHandle {
+        RecoveryConnectionHandle {
+            local_connection_id: format!("local-{id}"),
+            broker_connection_id: id.to_string(),
+            connection_secret: secret.to_string(),
+            institution_name: format!("Institution {id}"),
+            environment: "production".to_string(),
+        }
+    }
+
+    #[test]
+    fn recovery_registry_detects_only_connections_missing_from_local_state() {
+        let registry = vec![recovery_handle("broker-a", "secret-a"), recovery_handle("broker-b", "secret-b")];
+        let local = vec![recovery_handle("broker-a", "secret-a")];
+
+        let orphaned = orphaned_registry_connections(&registry, &local);
+
+        assert_eq!(orphaned.len(), 1);
+        assert_eq!(orphaned[0].broker_connection_id, "broker-b");
+    }
+
+    #[test]
+    fn recovery_registry_rejects_a_reused_broker_id_with_the_wrong_secret() {
+        let registry = vec![recovery_handle("broker-a", "original-secret")];
+        let local = vec![recovery_handle("broker-a", "different-secret")];
+
+        let orphaned = orphaned_registry_connections(&registry, &local);
+
+        assert_eq!(orphaned.len(), 1);
+    }
+
+    #[test]
+    fn recovery_registry_accepts_an_exact_connection_set() {
+        let registry = vec![
+            recovery_handle("broker-a", "secret-a"),
+            recovery_handle("broker-b", "secret-b"),
+        ];
+        let local = registry.clone();
+
+        assert!(orphaned_registry_connections(&registry, &local).is_empty());
+    }
+
     #[test]
     fn concurrent_sync_attempts_serialize_without_duplicate_rows() {
         let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
@@ -1526,7 +2182,7 @@ mod plaid_sync_tests {
 #[cfg(not(feature = "sandbox-dev"))]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, plaid_connections_data])
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, create_plaid_link_session, complete_plaid_link, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection])
         .run(tauri::generate_context!())
         .expect("error while running Money Map");
 }
