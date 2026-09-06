@@ -12,3 +12,5 @@ apps/desktop/src-tauri/target/
 *.db
 *.db-shm
 *.db-wal
+artifacts/windows/rehearsal/
+apps/desktop/src-tauri/rehearsal-runtime/

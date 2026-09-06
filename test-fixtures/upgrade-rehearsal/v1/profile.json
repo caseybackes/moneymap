@@ -1,0 +1,31 @@
+{
+  "manifest": {
+    "fixtureFormatVersion": 1,
+    "fixtureId": "money-map-upgrade-rehearsal-v1",
+    "expectedLogicalHash": "f7dead62cb716a0e9ab94bce06366388d8b0257d96a8fe0e20784c1458941972"
+  },
+  "categories": [
+    { "id": "cat-housing", "name": "Housing" },
+    { "id": "cat-income", "name": "Income" },
+    { "id": "cat-utilities", "name": "Utilities" }
+  ],
+  "accounts": [
+    { "id": "acct-checking", "name": "Example Checking", "type": "checking", "openingBalanceCents": 250000 },
+    { "id": "acct-savings", "name": "Example Savings", "type": "savings", "openingBalanceCents": 1000000 }
+  ],
+  "transactions": [
+    { "id": "txn-paycheck-01", "accountId": "acct-checking", "date": "2026-01-15", "description": "Example Payroll", "amountCents": 300000, "categoryId": "cat-income" },
+    { "id": "txn-rent-01", "accountId": "acct-checking", "date": "2026-01-16", "description": "Example Apartment Rent", "amountCents": -125000, "categoryId": "cat-housing" },
+    { "id": "txn-power-01", "accountId": "acct-checking", "date": "2026-01-20", "description": "Example Electric", "amountCents": -8500, "categoryId": "cat-utilities" },
+    { "id": "txn-power-02", "accountId": "acct-checking", "date": "2026-02-20", "description": "Example Electric", "amountCents": -9100, "categoryId": "cat-utilities" },
+    { "id": "txn-power-03", "accountId": "acct-checking", "date": "2026-03-20", "description": "Example Electric", "amountCents": -8800, "categoryId": "cat-utilities" }
+  ],
+  "schedules": [
+    { "id": "schedule-rent", "accountId": "acct-checking", "description": "Example Apartment Rent", "amountCents": -125000, "recurrence": "monthly", "startDate": "2026-02-01" }
+  ],
+  "recoveryStates": [
+    { "name": "consistent", "handles": [] },
+    { "name": "missing-profile", "handles": ["rehearsal-handle-missing-01"] },
+    { "name": "mismatched-profile", "handles": ["rehearsal-handle-mismatch-01"] }
+  ]
+}
