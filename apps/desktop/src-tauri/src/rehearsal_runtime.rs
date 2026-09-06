@@ -71,6 +71,7 @@ struct Fixture {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeManifest<'a> {
+    rehearsal_profile_id: &'a str,
     fixture_id: &'a str,
     fixture_format_version: u32,
     source_schema_version: u32,
@@ -140,13 +141,20 @@ fn fresh_key() -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn create_fixture_database(path: &Path, key: &str, fixture: &Fixture) -> Result<(), String> {
+fn fresh_profile_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    format!("rehearsal-{}", bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+}
+
+fn create_fixture_database(path: &Path, key: &str, profile_id: &str, fixture: &Fixture) -> Result<(), String> {
     let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
     connection.pragma_update(None, "key", key).map_err(|error| error.to_string())?;
     connection.execute_batch(
         "PRAGMA cipher_memory_security = ON;
          PRAGMA foreign_keys = ON;
          CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY NOT NULL);
+         CREATE TABLE rehearsal_metadata(profile_id TEXT PRIMARY KEY NOT NULL);
          CREATE TABLE categories(id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL COLLATE NOCASE UNIQUE);
          CREATE TABLE accounts(id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, opening_balance_cents INTEGER NOT NULL DEFAULT 0, reported_balance_cents INTEGER, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
          CREATE TABLE transactions(id TEXT PRIMARY KEY NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id), transaction_date TEXT NOT NULL, description TEXT NOT NULL, amount_cents INTEGER NOT NULL, category_id TEXT REFERENCES categories(id), notes TEXT, source TEXT NOT NULL DEFAULT 'manual', external_transaction_id TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(source, external_transaction_id));
@@ -157,6 +165,7 @@ fn create_fixture_database(path: &Path, key: &str, fixture: &Fixture) -> Result<
          INSERT INTO schema_migrations(version) VALUES (1),(2),(3),(4),(5),(6),(7);"
     ).map_err(|error| error.to_string())?;
     let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    transaction.execute("INSERT INTO rehearsal_metadata(profile_id) VALUES(?1)", params![profile_id]).map_err(|error| error.to_string())?;
     for item in &fixture.categories {
         transaction.execute("INSERT INTO categories(id,name) VALUES(?1,?2)", params![item.id, item.name]).map_err(|error| error.to_string())?;
     }
@@ -192,10 +201,11 @@ fn generate() -> Result<PathBuf, String> {
     let root = rehearsal_root()?;
     let staging = prepare_staging(&root)?;
     let key = fresh_key();
+    let profile_id = fresh_profile_id();
     let result = (|| {
         fs::create_dir(staging.join("backups")).map_err(|error| error.to_string())?;
-        create_fixture_database(&staging.join("money-map.db"), &key, &fixture)?;
-        let manifest = RuntimeManifest { fixture_id: &fixture.manifest.fixture_id, fixture_format_version: fixture.manifest.fixture_format_version, source_schema_version: 7, expected_target_schema_version: 9, logical_hash: &logical_hash };
+        create_fixture_database(&staging.join("money-map.db"), &key, &profile_id, &fixture)?;
+        let manifest = RuntimeManifest { rehearsal_profile_id: &profile_id, fixture_id: &fixture.manifest.fixture_id, fixture_format_version: fixture.manifest.fixture_format_version, source_schema_version: 7, expected_target_schema_version: 9, logical_hash: &logical_hash };
         fs::write(staging.join("manifest.json"), serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
         store_rehearsal_credentials(&key, &fixture)?;
         fs::rename(&staging, &root).map_err(|error| error.to_string())?;
@@ -203,6 +213,81 @@ fn generate() -> Result<PathBuf, String> {
     })();
     if result.is_err() && staging.exists() { let _ = fs::remove_dir_all(&staging); }
     result
+}
+
+fn open_encrypted(path: &Path, key: &str) -> Result<Connection, String> {
+    let connection = Connection::open(path).map_err(|error| error.to_string())?;
+    connection.pragma_update(None, "key", key).map_err(|error| error.to_string())?;
+    connection.query_row("SELECT COUNT(*) FROM sqlite_master", [], |_row| Ok(())).map_err(|_| "Encrypted rehearsal profile could not be opened with this key.".to_string())?;
+    Ok(connection)
+}
+
+fn migrate_to_current(connection: &mut Connection, force_failure: bool) -> Result<(), String> {
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let has_merchant_key: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('transactions') WHERE name='merchant_key')", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+    if !has_merchant_key {
+        transaction.execute_batch("ALTER TABLE transactions ADD COLUMN merchant_key TEXT; CREATE INDEX transactions_merchant_key ON transactions(merchant_key);").map_err(|error| error.to_string())?;
+        transaction.execute("UPDATE transactions SET merchant_key = lower(description)", []).map_err(|error| error.to_string())?;
+    }
+    transaction.execute_batch("CREATE TABLE IF NOT EXISTS categorization_rules(id TEXT PRIMARY KEY NOT NULL, merchant_key TEXT NOT NULL UNIQUE, category_id TEXT NOT NULL REFERENCES categories(id)); INSERT OR IGNORE INTO schema_migrations(version) VALUES(8);").map_err(|error| error.to_string())?;
+    if force_failure { return Err("Injected rehearsal migration failure.".into()); }
+    let has_pending: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('transactions') WHERE name='pending')", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+    if !has_pending { transaction.execute("ALTER TABLE transactions ADD COLUMN pending INTEGER NOT NULL DEFAULT 0", []).map_err(|error| error.to_string())?; }
+    transaction.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES(9)", []).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn validate_profile(connection: &Connection, expected_profile_id: &str) -> Result<(), String> {
+    let actual: String = connection.query_row("SELECT profile_id FROM rehearsal_metadata", [], |row| row.get(0)).map_err(|_| "Backup has no rehearsal profile identity.".to_string())?;
+    if actual != expected_profile_id { return Err("Backup belongs to a different rehearsal profile.".into()); }
+    Ok(())
+}
+
+fn create_backup(database: &Path, key: &str, expected_profile_id: &str, backup: &Path) -> Result<(), String> {
+    let connection = open_encrypted(database, key)?;
+    validate_profile(&connection, expected_profile_id)?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").map_err(|error| error.to_string())?;
+    drop(connection);
+    if backup.exists() { return Err("Backup destination already exists.".into()); }
+    fs::copy(database, backup).map_err(|error| error.to_string())?;
+    let validation = open_encrypted(backup, key)?;
+    validate_profile(&validation, expected_profile_id)?;
+    let integrity: String = validation.query_row("PRAGMA integrity_check", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+    if integrity != "ok" { return Err("Backup integrity validation failed.".into()); }
+    Ok(())
+}
+
+fn restore_backup(database: &Path, backup: &Path, key: &str, expected_profile_id: &str) -> Result<PathBuf, String> {
+    let validation = open_encrypted(backup, key)?;
+    validate_profile(&validation, expected_profile_id)?;
+    let integrity: String = validation.query_row("PRAGMA integrity_check", [], |row| row.get(0)).map_err(|error| error.to_string())?;
+    if integrity != "ok" { return Err("Backup integrity validation failed.".into()); }
+    drop(validation);
+    let staged = database.with_extension("restore-staging");
+    let archived = database.with_extension("before-restore");
+    if staged.exists() || archived.exists() { return Err("Restore staging or archive destination already exists.".into()); }
+    fs::copy(backup, &staged).map_err(|error| error.to_string())?;
+    open_encrypted(&staged, key)?;
+    fs::rename(database, &archived).map_err(|error| error.to_string())?;
+    if let Err(error) = fs::rename(&staged, database) {
+        let _ = fs::rename(&archived, database);
+        return Err(error.to_string());
+    }
+    Ok(archived)
+}
+
+fn reset_is_blocked(profile_readable: bool, synthetic_handles: &[String]) -> bool {
+    !profile_readable && !synthetic_handles.is_empty()
+}
+
+#[derive(Debug, PartialEq)]
+enum RecoveryState { Ready, Missing, Unreadable, RegistryMismatch }
+
+fn recovery_state(profile_exists: bool, profile_readable: bool, registry_matches: bool) -> RecoveryState {
+    if !profile_exists { RecoveryState::Missing }
+    else if !profile_readable { RecoveryState::Unreadable }
+    else if !registry_matches { RecoveryState::RegistryMismatch }
+    else { RecoveryState::Ready }
 }
 
 pub fn run() {
@@ -234,7 +319,7 @@ mod tests {
         let (fixture, _) = parse_fixture(FIXTURE_SOURCE).unwrap();
         let path = env::temp_dir().join(format!("money-map-rehearsal-{}.db", rand::random::<u64>()));
         let key = fresh_key();
-        create_fixture_database(&path, &key, &fixture).unwrap();
+        create_fixture_database(&path, &key, "test-profile", &fixture).unwrap();
         let connection = Connection::open(&path).unwrap();
         assert!(connection.query_row("SELECT COUNT(*) FROM sqlite_master", [], |row| row.get::<_, i64>(0)).is_err());
         connection.pragma_update(None, "key", &key).unwrap();
@@ -242,5 +327,61 @@ mod tests {
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM plaid_connections", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
         drop(connection);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migrations_are_idempotent_and_failure_is_contained() {
+        let (fixture, _) = parse_fixture(FIXTURE_SOURCE).unwrap();
+        let path = env::temp_dir().join(format!("money-map-rehearsal-migrate-{}.db", rand::random::<u64>()));
+        let key = fresh_key();
+        create_fixture_database(&path, &key, "test-profile", &fixture).unwrap();
+        let mut connection = open_encrypted(&path, &key).unwrap();
+        assert!(migrate_to_current(&mut connection, true).is_err());
+        assert_eq!(connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| row.get::<_, i64>(0)).unwrap(), 7);
+        migrate_to_current(&mut connection, false).unwrap();
+        migrate_to_current(&mut connection, false).unwrap();
+        assert_eq!(connection.query_row("SELECT max(version) FROM schema_migrations", [], |row| row.get::<_, i64>(0)).unwrap(), 9);
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM transactions WHERE merchant_key IS NOT NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 5);
+        drop(connection);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn backup_restore_rejects_wrong_key_without_replacing_profile() {
+        let (fixture, _) = parse_fixture(FIXTURE_SOURCE).unwrap();
+        let base = env::temp_dir().join(format!("money-map-rehearsal-restore-{}", rand::random::<u64>()));
+        fs::create_dir(&base).unwrap();
+        let database = base.join("money-map.db");
+        let backup = base.join("profile.backup");
+        let key = fresh_key();
+        create_fixture_database(&database, &key, "test-profile", &fixture).unwrap();
+        create_backup(&database, &key, "test-profile", &backup).unwrap();
+        let original_size = fs::metadata(&database).unwrap().len();
+        assert!(restore_backup(&database, &backup, "wrong-key", "test-profile").is_err());
+        assert!(restore_backup(&database, &backup, &key, "different-profile").is_err());
+        assert_eq!(fs::metadata(&database).unwrap().len(), original_size);
+        let mut connection = open_encrypted(&database, &key).unwrap();
+        migrate_to_current(&mut connection, false).unwrap();
+        connection.execute("DELETE FROM transactions WHERE id='txn-power-03'", []).unwrap();
+        drop(connection);
+        let archived = restore_backup(&database, &backup, &key, "test-profile").unwrap();
+        let restored = open_encrypted(&database, &key).unwrap();
+        assert_eq!(restored.query_row("SELECT COUNT(*) FROM transactions", [], |row| row.get::<_, i64>(0)).unwrap(), 5);
+        drop(restored);
+        fs::remove_file(database).unwrap();
+        fs::remove_file(backup).unwrap();
+        fs::remove_file(archived).unwrap();
+        fs::remove_dir(base).unwrap();
+    }
+
+    #[test]
+    fn synthetic_recovery_states_block_only_unsafe_reset() {
+        assert_eq!(recovery_state(true, true, true), RecoveryState::Ready);
+        assert_eq!(recovery_state(false, false, false), RecoveryState::Missing);
+        assert_eq!(recovery_state(true, false, true), RecoveryState::Unreadable);
+        assert_eq!(recovery_state(true, true, false), RecoveryState::RegistryMismatch);
+        assert!(!reset_is_blocked(true, &["fake-handle".to_string()]));
+        assert!(!reset_is_blocked(false, &[]));
+        assert!(reset_is_blocked(false, &["fake-handle".to_string()]));
     }
 }
