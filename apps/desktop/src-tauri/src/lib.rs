@@ -468,12 +468,14 @@ fn refresh_recovery_registry(connection: &Connection, allow_empty: bool) -> Resu
     if PLAID_ENVIRONMENT != "production" {
         return Ok(());
     }
-    let connections = database_recovery_handles(connection)?;
-    if connections.is_empty() && !allow_empty && !load_recovery_registry()?.connections.is_empty() {
-        return Ok(());
-    }
     let identity = profile_id()?;
     let previous = load_recovery_registry()?;
+    let database_connections = database_recovery_handles(connection)?;
+    let connections = merge_recovery_connections(
+        &previous.connections,
+        database_connections,
+        !allow_empty,
+    );
     save_recovery_registry(&RecoveryRegistry {
         version: 1,
         revision: previous.revision.saturating_add(1),
@@ -482,6 +484,21 @@ fn refresh_recovery_registry(connection: &Connection, allow_empty: bool) -> Resu
         connections,
     })?;
     save_lifecycle(&identity, if database_recovery_handles(connection)?.is_empty() { StoredLifecycle::Initialized } else { StoredLifecycle::Active })
+}
+
+fn merge_recovery_connections(
+    previous: &[RecoveryConnectionHandle],
+    mut database_connections: Vec<RecoveryConnectionHandle>,
+    retain_unmatched_previous: bool,
+) -> Vec<RecoveryConnectionHandle> {
+    if retain_unmatched_previous {
+        let unmatched = previous.iter()
+            .filter(|registered| !database_connections.iter().any(|local| recovery_handle_matches(registered, local)))
+            .cloned()
+            .collect::<Vec<_>>();
+        database_connections.extend(unmatched);
+    }
+    database_connections
 }
 
 fn orphaned_registry_connections(
@@ -2144,6 +2161,20 @@ mod plaid_sync_tests {
         let local = registry.clone();
 
         assert!(orphaned_registry_connections(&registry, &local).is_empty());
+    }
+
+    #[test]
+    fn restoring_an_older_profile_never_discards_newer_recovery_authority() {
+        let old = recovery_handle("broker-old", "secret-old");
+        let newer = recovery_handle("broker-new", "secret-new");
+        let merged = merge_recovery_connections(
+            &[old.clone(), newer.clone()],
+            vec![old],
+            true,
+        );
+
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|handle| recovery_handle_matches(handle, &newer)));
     }
 
     #[test]
