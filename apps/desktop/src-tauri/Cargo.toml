@@ -6,12 +6,19 @@ authors = ["Casey Backes"]
 edition = "2021"
 
 [features]
-default = []
+default = ["production"]
+production = []
 sandbox-dev = []
+rehearsal = []
 
 [lib]
 name = "money_map_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "money-map-rehearsal"
+path = "src/rehearsal_main.rs"
+required-features = ["rehearsal"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -23,6 +30,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tauri = { version = "2", features = [] }
 url = "2"
 

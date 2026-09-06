@@ -18,7 +18,7 @@ if (-not (Test-Path -LiteralPath $tauriCli)) { throw 'Install the desktop depend
 $env:PATH = "C:\Strawberry\perl\bin;C:\Users\Admin\.cargo\bin;$env:PATH"
 Push-Location $desktopRoot
 try {
-    & $node $tauriCli build --no-bundle --config src-tauri\tauri.dev.conf.json --features sandbox-dev
+    & $node $tauriCli build --no-bundle --config src-tauri\tauri.dev.conf.json --no-default-features --features sandbox-dev
     if ($LASTEXITCODE -ne 0) { throw "Tauri build failed with exit code $LASTEXITCODE." }
 }
 finally {

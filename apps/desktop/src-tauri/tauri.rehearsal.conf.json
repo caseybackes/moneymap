@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Money Map Upgrade Rehearsal",
+  "identifier": "com.caseybackes.moneymap.rehearsal",
+  "app": {
+    "windows": [
+      {
+        "create": false,
+        "title": "Money Map Upgrade Rehearsal — Synthetic Data Only",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 640
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-src 'none'; worker-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}
