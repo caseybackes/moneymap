@@ -711,7 +711,7 @@ pub struct RecurringDetectResult {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct DetectionRow {
     id: String,
     account_id: String,
@@ -735,14 +735,58 @@ fn inferred_recurrence(intervals: &[i64]) -> (&'static str, Option<&'static str>
     let mut sorted = intervals.to_vec();
     sorted.sort_unstable();
     let median = sorted[sorted.len() / 2];
-    match median {
+    let inferred = match median {
         6..=8 => ("weekly", Some("+7 days"), 8500),
         12..=16 => ("biweekly", Some("+14 days"), 8250),
         25..=35 => ("monthly", Some("+1 month"), 8500),
         80..=100 => ("quarterly", Some("+3 months"), 8000),
         350..=380 => ("yearly", Some("+1 year"), 7750),
         _ => ("irregular", None, 4500),
+    };
+    let all_intervals_match = intervals.iter().all(|interval| match inferred.0 {
+        "weekly" => (6..=8).contains(interval),
+        "biweekly" => (12..=16).contains(interval),
+        "monthly" => (25..=35).contains(interval),
+        "quarterly" => (80..=100).contains(interval),
+        "yearly" => (350..=380).contains(interval),
+        _ => false,
+    });
+    if all_intervals_match {
+        inferred
+    } else {
+        ("irregular", None, 4500)
     }
+}
+
+fn amounts_are_similar(left: i64, right: i64) -> bool {
+    let reference = left.unsigned_abs().max(right.unsigned_abs());
+    let tolerance = 500_u64.max(reference.saturating_mul(15) / 100);
+    left.abs_diff(right) <= tolerance
+}
+
+fn recurring_cluster(mut observations: Vec<DetectionRow>, minimum: usize) -> Option<Vec<DetectionRow>> {
+    observations.sort_by(|left, right| left.date.cmp(&right.date).then(left.id.cmp(&right.id)));
+    let mut amount_clusters: Vec<Vec<DetectionRow>> = Vec::new();
+    for observation in observations {
+        if let Some(cluster) = amount_clusters.iter_mut().find(|cluster| {
+            amounts_are_similar(cluster[0].amount_cents, observation.amount_cents)
+        }) {
+            cluster.push(observation);
+        } else {
+            amount_clusters.push(vec![observation]);
+        }
+    }
+
+    amount_clusters.into_iter()
+        .filter(|cluster| cluster.len() >= minimum)
+        .filter(|cluster| {
+            let intervals = cluster.windows(2).map(|pair| pair[1].day_number - pair[0].day_number).collect::<Vec<_>>();
+            let (recurrence, _, _) = inferred_recurrence(&intervals);
+            recurrence != "irregular" && recurrence != "insufficient_evidence"
+        })
+        .max_by(|left, right| left.len().cmp(&right.len()).then_with(|| {
+            left.last().map(|row| &row.date).cmp(&right.last().map(|row| &row.date))
+        }))
 }
 
 pub fn detect_recurring(
@@ -832,16 +876,13 @@ pub fn detect_recurring(
     }
 
     let mut candidates = Vec::new();
-    for ((_account_id, party_key), mut observations) in groups {
-        if observations.len() < minimum as usize { continue; }
-        observations.sort_by(|left, right| left.date.cmp(&right.date).then(left.id.cmp(&right.id)));
+    for ((_account_id, party_key), observations) in groups {
+        let Some(observations) = recurring_cluster(observations, minimum as usize) else { continue; };
         let intervals = observations.windows(2).map(|pair| pair[1].day_number - pair[0].day_number).collect::<Vec<_>>();
         let mut amounts = observations.iter().map(|row| row.amount_cents).collect::<Vec<_>>();
         amounts.sort_unstable();
         let median_amount = amounts[amounts.len() / 2];
         let (recurrence, modifier, mut confidence) = inferred_recurrence(&intervals);
-        let amount_range = amounts[amounts.len() - 1].saturating_sub(amounts[0]).unsigned_abs();
-        if amount_range > median_amount.unsigned_abs() / 10 { confidence = confidence.saturating_sub(1500); }
         if observations.len() == 2 { confidence = confidence.saturating_sub(1000); }
         let last = observations.last().expect("minimum occurrence validation");
         let next_expected_date = if let Some(modifier) = modifier {
@@ -889,12 +930,9 @@ pub fn detect_recurring(
         .then(left.party_key.cmp(&right.party_key)));
     let candidate_truncated = candidates.len() > candidate_limit as usize;
     candidates.truncate(candidate_limit as usize);
-    let mut warnings = Vec::new();
-    if truncated { warnings.push(format!("transaction scan truncated at {scan_limit} records")); }
-    if candidate_truncated { warnings.push(format!("candidate results truncated at {candidate_limit}")); }
     Ok(RecurringDetectResult {
         schema_version: SCHEMA_VERSION.to_owned(), capability_version: CAPABILITY_VERSION.to_owned(),
-        candidates, scanned_records, truncated: truncated || candidate_truncated, warnings,
+        candidates, scanned_records, truncated: truncated || candidate_truncated, warnings: Vec::new(),
     })
 }
 
@@ -1147,6 +1185,50 @@ mod tests {
         assert_eq!(candidate.matching_schedule_refs.len(), 1);
         assert_eq!(candidate.matching_schedule_refs[0].id, "money-map:schedule:loan-schedule");
         assert_eq!(candidate.candidate_temporal_roles, vec!["settlement_date"]);
+    }
+
+    #[test]
+    fn recurring_detection_rejects_same_name_transfers_with_unrelated_amounts() {
+        let connection = database();
+        connection.execute_batch(
+            "INSERT INTO transactions VALUES(
+               'transfer-1','checking','2026-01-03','USAA FUNDS TRANSFER DB',-2000,'debt','manual',NULL,'usaa funds transfer db',0,'2026-01-03T08:00:00Z');
+             INSERT INTO transactions VALUES(
+               'transfer-2','checking','2026-02-04','USAA FUNDS TRANSFER DB',-130000,'debt','manual',NULL,'usaa funds transfer db',0,'2026-02-04T08:00:00Z');
+             INSERT INTO transactions VALUES(
+               'transfer-3','checking','2026-03-02','USAA FUNDS TRANSFER DB',-5000,'debt','manual',NULL,'usaa funds transfer db',0,'2026-03-02T08:00:00Z');
+             INSERT INTO transactions VALUES(
+               'transfer-4','checking','2026-04-05','USAA FUNDS TRANSFER DB',-20000,'debt','manual',NULL,'usaa funds transfer db',0,'2026-04-05T08:00:00Z');",
+        ).unwrap();
+
+        let result = detect_recurring(
+            &connection,
+            &actor(vec![RecordScope::RecurringAnalysis, RecordScope::Schedules]),
+            &RecurringDetectRequest::default(),
+        ).unwrap();
+
+        assert!(result.candidates.is_empty());
+    }
+
+    #[test]
+    fn recurring_detection_rejects_similar_amounts_without_a_consistent_schedule() {
+        let connection = database();
+        connection.execute_batch(
+            "INSERT INTO transactions VALUES(
+               'random-1','checking','2026-01-03','EXAMPLE MERCHANT',-4999,'debt','manual',NULL,'example merchant',0,'2026-01-03T08:00:00Z');
+             INSERT INTO transactions VALUES(
+               'random-2','checking','2026-01-19','EXAMPLE MERCHANT',-5000,'debt','manual',NULL,'example merchant',0,'2026-01-19T08:00:00Z');
+             INSERT INTO transactions VALUES(
+               'random-3','checking','2026-03-02','EXAMPLE MERCHANT',-4999,'debt','manual',NULL,'example merchant',0,'2026-03-02T08:00:00Z');",
+        ).unwrap();
+
+        let result = detect_recurring(
+            &connection,
+            &actor(vec![RecordScope::RecurringAnalysis, RecordScope::Schedules]),
+            &RecurringDetectRequest::default(),
+        ).unwrap();
+
+        assert!(result.candidates.is_empty());
     }
 
     #[test]

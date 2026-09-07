@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "check:ui-copy": "node ../../scripts/verify-ui-copy.mjs",
+    "build": "npm run check:ui-copy && tsc -b && vite build",
     "tauri": "tauri"
   },
   "dependencies": {
