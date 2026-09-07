@@ -19,7 +19,7 @@ function fail(message) {
 }
 
 const manifest = fixture.manifest;
-if (!manifest || manifest.fixtureFormatVersion !== 1 || manifest.fixtureId !== "money-map-upgrade-rehearsal-v1") {
+if (fixture.synthetic !== true || !manifest || manifest.synthetic !== true || manifest.fixtureFormatVersion !== 1 || manifest.fixtureId !== "money-map-upgrade-rehearsal-v1") {
   fail("manifest must declare the supported v1 fixture identity.");
 }
 for (const field of ["categories", "accounts", "transactions", "schedules", "recoveryStates"]) {

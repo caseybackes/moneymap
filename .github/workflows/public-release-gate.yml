@@ -1,0 +1,26 @@
+name: Public release privacy gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  privacy-gate:
+    runs-on: windows-latest
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Record runtime
+        shell: pwsh
+        run: node --version
+      - name: Test scanner rules
+        run: node scripts/verify-public-release.mjs --self-test
+      - name: Scan source and complete Git history
+        run: node scripts/verify-public-release.mjs

@@ -31,11 +31,22 @@ Linux uses the same application source but has no packaging or runtime-validatio
 
 Generated executables, PDBs, local databases, and credentials do not go in Git. Each public application build should be attached to a GitHub Release tagged as `vMAJOR.MINOR.PATCH`, after clean-build and smoke-test evidence is recorded.
 
+Run `node .\scripts\verify-public-release.mjs` before every push and publish. The gate scans the complete reachable Git history and visible working tree for forbidden financial exports, databases, credentials, private-key material, generated artifacts, and unexplained blobs over 5 MiB. It reports finding classes and paths without printing matched values. It also requires each tracked financial fixture to declare itself synthetic and carry a verified SHA-256 manifest.
+
+Install the repository-managed pre-push hook once per clone:
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+GitHub runs the same checked-in scanner against a full-history checkout. The Production publisher invokes it before compiling a release artifact.
+
 ## Release checklist
 
-1. Update `version` in `apps/desktop/src-tauri/tauri.conf.json` only, then run `.\scripts\sync-tauri-version.ps1`.
-2. Build the intended channel into its fixed artifact directory.
-3. Launch the executable from that artifact directory and verify the version/build channel.
-4. Check `git status`, confirm artifacts, databases, and credentials are excluded, then commit source and documentation.
-5. Create and push an annotated tag `vMAJOR.MINOR.PATCH`.
-6. Create the corresponding GitHub Release and upload the verified executable and checksum file.
+1. Run `node .\scripts\verify-public-release.mjs`; stop on any finding and inspect it without copying a matched value into discussion or CI logs.
+2. Update `version` in `apps/desktop/src-tauri/tauri.conf.json` only, then run `.\scripts\sync-tauri-version.ps1`.
+3. Build the intended channel into its fixed artifact directory.
+4. Launch the executable from that artifact directory and verify the version/build channel.
+5. Check `git status`, confirm artifacts, databases, and credentials are excluded, then commit source and documentation.
+6. Create and push an annotated tag `vMAJOR.MINOR.PATCH`.
+7. Create the corresponding GitHub Release and upload the verified executable and checksum file.

@@ -13,6 +13,7 @@ const data = JSON.parse(canonicalText);
 const digest = crypto.createHash("sha256").update(canonicalText, "utf8").digest("hex");
 
 if (manifest.fixtureFormatVersion !== 1) throw new Error("Unsupported recurring-bill fixture format.");
+if (manifest.synthetic !== true || data.synthetic !== true) throw new Error("Fixture must be explicitly declared synthetic.");
 if (manifest.fixtureId !== data.fixtureId) throw new Error("Fixture identity differs from its manifest.");
 if (manifest.sha256 !== digest) throw new Error(`Fixture hash mismatch: expected ${manifest.sha256}, got ${digest}.`);
 if (!data.transactions.some(transaction => transaction.pending)) throw new Error("Fixture must contain a pending edge case.");

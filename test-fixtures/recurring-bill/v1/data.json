@@ -1,4 +1,5 @@
 {
+  "synthetic": true,
   "fixtureId": "money-map-recurring-bill-v1",
   "categories": [
     { "id": "category-utilities", "name": "Utilities" },

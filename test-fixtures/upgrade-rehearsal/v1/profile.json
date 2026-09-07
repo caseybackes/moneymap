@@ -1,8 +1,10 @@
 {
+  "synthetic": true,
   "manifest": {
+    "synthetic": true,
     "fixtureFormatVersion": 1,
     "fixtureId": "money-map-upgrade-rehearsal-v1",
-    "expectedLogicalHash": "f7dead62cb716a0e9ab94bce06366388d8b0257d96a8fe0e20784c1458941972"
+    "expectedLogicalHash": "0b7c813931d701fcb7adbdf8f1508b8d7f0f81eb6cc817829dd6182b213bf6ef"
   },
   "categories": [
     { "id": "cat-housing", "name": "Housing" },

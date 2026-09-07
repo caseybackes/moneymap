@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+node scripts/verify-public-release.mjs --self-test
+node scripts/verify-public-release.mjs
