@@ -7,7 +7,7 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $versionSync = Join-Path $PSScriptRoot 'sync-tauri-version.ps1'
 $privacyGate = Join-Path $PSScriptRoot 'verify-public-release.mjs'
 $desktopRoot = Join-Path $repositoryRoot 'apps\desktop'
-$node = 'C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
+$node = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
 $tauriCli = Join-Path $desktopRoot 'node_modules\@tauri-apps\cli\tauri.js'
 $output = Join-Path $repositoryRoot 'artifacts\windows\release'
 $binary = Join-Path $desktopRoot 'src-tauri\target\release\money-map-desktop.exe'
@@ -17,8 +17,11 @@ if (-not (Test-Path -LiteralPath $tauriCli)) { throw 'Install the desktop depend
 & $node $privacyGate
 if ($LASTEXITCODE -ne 0) { throw "Public-release privacy gate failed with exit code $LASTEXITCODE." }
 & $versionSync
+$env:MONEY_MAP_SOURCE_REVISION = (& git -C $repositoryRoot rev-parse --short=12 HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $env:MONEY_MAP_SOURCE_REVISION) { throw 'Could not resolve the source revision for Production build provenance.' }
 
-$env:PATH = "C:\Strawberry\perl\bin;C:\Users\Admin\.cargo\bin;$env:PATH"
+$cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+$env:PATH = "C:\Strawberry\perl\bin;$cargoBin;$env:PATH"
 Push-Location $desktopRoot
 try {
     & $node $tauriCli build --no-bundle --features production -- --no-default-features

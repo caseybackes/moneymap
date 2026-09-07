@@ -14,7 +14,7 @@ Money Map uses semantic versioning: `MAJOR.MINOR.PATCH`.
 - `apps/desktop/src-tauri/tauri.conf.json`
 - `apps/desktop/src-tauri/Cargo.toml`
 
-The Tauri value is compiled into the executable and is the authoritative runtime version exposed to the application. Run `.\scripts\sync-tauri-version.ps1 -Check` in automation to verify all copies already agree. A future Settings/About view will display it alongside build channel, source revision, build time, and dependency provenance.
+The Tauri value is compiled into the executable and is the authoritative runtime version exposed to the application. Run `.\scripts\sync-tauri-version.ps1 -Check` in automation to verify all copies already agree. Settings/About displays it alongside build channel, source revision, build time, runtime provenance, and local schema state. The Production publisher resolves the source revision before compilation so an artifact can be tied to its exact commit.
 
 ## Build channels
 

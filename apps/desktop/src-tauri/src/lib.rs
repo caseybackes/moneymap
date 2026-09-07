@@ -2,6 +2,7 @@ mod finance_tools;
 mod proposal_tools;
 mod profile_backup;
 mod recovery_state;
+mod support_report;
 
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use keyring::Entry;
@@ -39,6 +40,10 @@ const PLAID_BROKER_BASE_URL: &str = "https://money-map-plaid-broker-production.c
 const PLAID_ENVIRONMENT: &str = "sandbox";
 #[cfg(not(feature = "sandbox-dev"))]
 const PLAID_ENVIRONMENT: &str = "production";
+#[cfg(feature = "sandbox-dev")]
+const BUILD_CHANNEL: &str = "Development / Sandbox";
+#[cfg(not(feature = "sandbox-dev"))]
+const BUILD_CHANNEL: &str = "Production";
 #[cfg(feature = "sandbox-dev")]
 const TRADESTATION_SIM_BROKER_BASE_URL: &str = "https://money-map-tradestation-sim-broker.cloud-admin-f91.workers.dev";
 #[cfg(feature = "sandbox-dev")]
@@ -110,6 +115,13 @@ struct RecoveryStatus {
 struct ProfileBackupResult {
     backup_path: String,
     created_at: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SupportExportResult {
+    path: String,
+    generated_at: u64,
 }
 
 fn profile_id() -> Result<String, String> {
@@ -1050,15 +1062,7 @@ fn recovery_status(app: AppHandle) -> Result<RecoveryStatus, String> {
     } else {
         assess_recovery(recovery_state::DatabaseEvidence::Missing, None)?
     };
-    let state = match assessment.decision {
-        recovery_state::Decision::FirstRun => "first_run",
-        recovery_state::Decision::Healthy => "healthy",
-        recovery_state::Decision::RepairRegistry => "registry_repair",
-        recovery_state::Decision::OrphanedRemoteAuthority => "orphaned_remote_authority",
-        recovery_state::Decision::LostLocalState => "lost_local_state",
-        recovery_state::Decision::UnknownAuthority => "unknown_authority",
-        recovery_state::Decision::Retired => "retired",
-    }.to_string();
+    let state = recovery_decision_name(assessment.decision).to_string();
     let recovery_required = PLAID_ENVIRONMENT == "production" && assessment.decision.blocks_new_connection();
     let authority_unknown = assessment.decision == recovery_state::Decision::UnknownAuthority;
     let message = match assessment.decision {
@@ -1082,6 +1086,96 @@ fn recovery_status(app: AppHandle) -> Result<RecoveryStatus, String> {
         orphaned_connections: assessment.orphaned.len(),
         message,
     })
+}
+
+fn recovery_decision_name(decision: recovery_state::Decision) -> &'static str {
+    match decision {
+        recovery_state::Decision::FirstRun => "first_run",
+        recovery_state::Decision::Healthy => "healthy",
+        recovery_state::Decision::RepairRegistry => "registry_repair",
+        recovery_state::Decision::OrphanedRemoteAuthority => "orphaned_remote_authority",
+        recovery_state::Decision::LostLocalState => "lost_local_state",
+        recovery_state::Decision::UnknownAuthority => "unknown_authority",
+        recovery_state::Decision::Retired => "retired",
+    }
+}
+
+fn read_only_recovery_state(app: &AppHandle) -> String {
+    let database = match app.path().app_local_data_dir() {
+        Ok(directory) => directory.join("money-map.db"),
+        Err(_) => return "unavailable".into(),
+    };
+    let assessment = if !database.is_file() {
+        assess_recovery(recovery_state::DatabaseEvidence::Missing, None)
+    } else {
+        match open_existing_database_read_only(app) {
+            Ok((connection, _)) => assess_recovery(recovery_state::DatabaseEvidence::Readable, Some(&connection)),
+            Err(_) => assess_recovery(recovery_state::DatabaseEvidence::Unreadable, None),
+        }
+    };
+    assessment
+        .map(|value| recovery_decision_name(value.decision).to_string())
+        .unwrap_or_else(|_| "unavailable".into())
+}
+
+fn support_report_snapshot(app: &AppHandle) -> support_report::SupportReport {
+    let generated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let recovery_state = read_only_recovery_state(app);
+    let profile = match app.path().app_local_data_dir() {
+        Ok(directory) => {
+            let database = directory.join("money-map.db");
+            if !database.exists() {
+                support_report::unavailable_profile("missing", &recovery_state)
+            } else {
+                match open_existing_database_read_only(app) {
+                    Ok((connection, _)) => support_report::summarize_profile(
+                        &connection,
+                        profile_backup::CURRENT_SCHEMA_VERSION,
+                        &recovery_state,
+                    ).unwrap_or_else(|_| support_report::unavailable_profile("unreadable", &recovery_state)),
+                    Err(_) => support_report::unavailable_profile("unreadable", &recovery_state),
+                }
+            }
+        }
+        Err(_) => support_report::unavailable_profile("unreadable", &recovery_state),
+    };
+    support_report::report(generated_at, support_report::build_provenance(BUILD_CHANNEL), profile)
+}
+
+#[tauri::command]
+fn support_report_preview(app: AppHandle) -> support_report::SupportReport {
+    support_report_snapshot(&app)
+}
+
+#[tauri::command]
+fn export_support_report(app: AppHandle) -> Result<SupportExportResult, String> {
+    let report = support_report_snapshot(&app);
+    let serialized = support_report::serialize(&report)?;
+    let directory = app.path().document_dir().map_err(|error| error.to_string())?.join("Money Map Support");
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let (final_path, staging_path) = (0..100).find_map(|attempt| {
+        let suffix = if attempt == 0 { String::new() } else { format!("-{attempt}") };
+        let final_path = directory.join(format!("money-map-support-{}{suffix}.json", report.generated_at));
+        let staging_path = directory.join(format!(".money-map-support-{}{suffix}.tmp", report.generated_at));
+        if !final_path.exists() && !staging_path.exists() { Some((final_path, staging_path)) } else { None }
+    }).ok_or("Money Map could not allocate a unique support-report filename.")?;
+    let mut file = fs::OpenOptions::new().create_new(true).write(true).open(&staging_path)
+        .map_err(|error| format!("Could not create the support-report staging file: {error}"))?;
+    let write_result = file.write_all(serialized.as_bytes())
+        .and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&staging_path);
+        return Err(format!("Could not write the support report: {error}"));
+    }
+    if let Err(error) = fs::rename(&staging_path, &final_path) {
+        let _ = fs::remove_file(&staging_path);
+        return Err(format!("Could not publish the support report: {error}"));
+    }
+    Ok(SupportExportResult { path: final_path.display().to_string(), generated_at: report.generated_at })
 }
 
 fn ensure_new_connection_allowed(app: &AppHandle) -> Result<(), String> {
@@ -2395,7 +2489,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .manage(TradeStationOAuthState::default())
         .setup(create_main_window)
-        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, account_balance_history, create_account, create_transaction, update_transaction, categorization_match, delete_transaction, ledger_data, finance_capabilities_list, finance_transactions_search, finance_schedules_search, finance_recurring_detect, finance_proposals_create_schedule, finance_proposals_get, finance_proposals_reject, finance_proposals_confirm_native, finance_proposals_execute_confirmed, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_link_session, complete_plaid_link, create_plaid_account_update_session, complete_plaid_account_update, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection, save_tradestation_sim_setup_key, tradestation_sim_connection_status, start_tradestation_sim_connection])
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, support_report_preview, export_support_report, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, account_balance_history, create_account, create_transaction, update_transaction, categorization_match, delete_transaction, ledger_data, finance_capabilities_list, finance_transactions_search, finance_schedules_search, finance_recurring_detect, finance_proposals_create_schedule, finance_proposals_get, finance_proposals_reject, finance_proposals_confirm_native, finance_proposals_execute_confirmed, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_link_session, complete_plaid_link, create_plaid_account_update_session, complete_plaid_account_update, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection, save_tradestation_sim_setup_key, tradestation_sim_connection_status, start_tradestation_sim_connection])
         .build(tauri::generate_context!())
         .expect("error while building Money Map Dev");
 
@@ -2850,7 +2944,7 @@ mod plaid_sync_tests {
 pub fn run() {
     tauri::Builder::default()
         .setup(create_main_window)
-        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, account_balance_history, create_account, create_transaction, update_transaction, categorization_match, delete_transaction, ledger_data, finance_capabilities_list, finance_transactions_search, finance_schedules_search, finance_recurring_detect, finance_proposals_create_schedule, finance_proposals_get, finance_proposals_reject, finance_proposals_confirm_native, finance_proposals_execute_confirmed, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, create_plaid_link_session, complete_plaid_link, create_plaid_account_update_session, complete_plaid_account_update, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection])
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, support_report_preview, export_support_report, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, account_balance_history, create_account, create_transaction, update_transaction, categorization_match, delete_transaction, ledger_data, finance_capabilities_list, finance_transactions_search, finance_schedules_search, finance_recurring_detect, finance_proposals_create_schedule, finance_proposals_get, finance_proposals_reject, finance_proposals_confirm_native, finance_proposals_execute_confirmed, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, create_plaid_link_session, complete_plaid_link, create_plaid_account_update_session, complete_plaid_account_update, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection])
         .run(tauri::generate_context!())
         .expect("error while running Money Map");
 }

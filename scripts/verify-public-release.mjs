@@ -24,10 +24,11 @@ const secretRules = [
   ["GitHub token", new RegExp(`(?:ghp_[A-Za-z0-9]{30,}|${"github_"}${"pat_"}[A-Za-z0-9_]{30,})`)],
   ["AWS access key", /AKIA[0-9A-Z]{16}/],
   ["Plaid access token", /access-(?:sandbox|development|production)-[A-Za-z0-9_-]{12,}/i],
-  ["hard-coded credential", /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|plaid[_-]?secret|password)\s*[=:]\s*["']([^"'\r\n]{16,})["']/i],
+  ["hard-coded credential", /(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|connection[_-]?secret|plaid[_-]?secret|password)\s*[=:]\s*["']([^"'\r\n]{16,})["']/i],
 ];
 
-const placeholder = /(?:example|fake|fixture|placeholder|sample|test|dummy|changeme|redacted|your[-_])/i;
+const placeholder = /(?:canary|example|fake|fixture|placeholder|sample|test|dummy|changeme|redacted|your[-_])/i;
+const absoluteUserHome = new RegExp(`(?:[A-Za-z]:${"\\\\"}Users${"\\\\"}[^\\\\\r\n]+|/${"ho"}${"me"}/[^/\r\n]+)`, "i");
 
 function git(args, options = {}) {
   const result = spawnSync("git", args, {
@@ -162,6 +163,7 @@ function selfTest() {
   assert.equal(secretFinding(Buffer.from('password = "short-synthetic-key"'), "test/example.test.js"), null);
   assert.equal(secretFinding(Buffer.from('password = "realistic-looking-credential-material-123456"'), "test/example.test.js"), "hard-coded credential");
   assert.equal(secretFinding(Buffer.from("env.PLAID_SECRET")), null);
+  assert.equal(absoluteUserHome.test(`${"C:"}${"\\"}${"Users"}${"\\"}someone${"\\"}file.txt`), true);
   console.log("Public-release gate self-test passed.");
 }
 
@@ -198,8 +200,10 @@ for (const file of visibleFiles) {
   const size = fs.statSync(absolute).size;
   if (size > maximumBlobBytes) findings.push(["working tree file over 5 MiB", file]);
   else {
-    const secret = secretFinding(fs.readFileSync(absolute), file);
+    const bytes = fs.readFileSync(absolute);
+    const secret = secretFinding(bytes, file);
     if (secret) findings.push([`working tree ${secret}`, file]);
+    if (absoluteUserHome.test(bytes.toString("utf8"))) findings.push(["working tree absolute user-home path", file]);
   }
 }
 

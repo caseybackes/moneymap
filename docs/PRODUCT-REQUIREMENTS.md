@@ -71,6 +71,7 @@ Money Map is an installed, local-first desktop application for one person to mod
 ### Data and platform constraints
 
 - Financial data is stored locally in an encrypted SQLCipher database.
+- Settings exposes the running application version, build channel, source revision, build time, runtime versions, and local schema state. A user may save an allowlisted support report that contains only build/platform facts and coarse store, migration, recovery, and synchronization state categories; it never copies raw logs, absolute paths, financial records, account identity, or credentials.
 - Sandbox Plaid Link is permitted for development. It uses an owner-controlled Plaid dashboard account, encrypted broker-side token handling, and encrypted local connection metadata. Real-bank connection remains gated on Sandbox verification, review-before-import, consent, and disconnect behavior.
 - Development and production are separate build/deployment environments. Development is Sandbox-only; production cannot contain Sandbox credentials, routes, or reset tools. They use separate Worker deployments and local application data identities.
 - Production refuses to start when its compiled environment and broker route do not agree. The broker likewise refuses financial routes unless `APP_ENVIRONMENT` is explicitly `sandbox` or `production`.

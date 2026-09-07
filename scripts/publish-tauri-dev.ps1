@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $versionSync = Join-Path $PSScriptRoot 'sync-tauri-version.ps1'
 $desktopRoot = Join-Path $repositoryRoot 'apps\desktop'
-$node = 'C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
+$node = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
 $tauriCli = Join-Path $desktopRoot 'node_modules\@tauri-apps\cli\tauri.js'
 $output = Join-Path $repositoryRoot 'artifacts\windows\dev'
 $binary = Join-Path $desktopRoot 'src-tauri\target\release\money-map-desktop.exe'
@@ -15,7 +15,8 @@ if (-not (Test-Path -LiteralPath $node)) { throw "Current Node runtime was not f
 if (-not (Test-Path -LiteralPath $tauriCli)) { throw 'Install the desktop dependencies before publishing: npm install (from apps\desktop).' }
 & $versionSync
 
-$env:PATH = "C:\Strawberry\perl\bin;C:\Users\Admin\.cargo\bin;$env:PATH"
+$cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
+$env:PATH = "C:\Strawberry\perl\bin;$cargoBin;$env:PATH"
 Push-Location $desktopRoot
 try {
     & $node $tauriCli build --no-bundle --config src-tauri\tauri.dev.conf.json --no-default-features --features sandbox-dev

@@ -24,7 +24,7 @@ npm run tauri dev
 Use the bundled Node runtime if the system Node installation is unavailable or too old:
 
 ```powershell
-$node24 = 'C:\Users\Admin\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
+$node24 = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe'
 & $node24 'C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js' run build
 ```
 

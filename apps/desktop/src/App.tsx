@@ -25,6 +25,9 @@ type AppCapabilities = { sandboxEnabled: boolean };
 type RecoveryStatus = { state: string; recoveryRequired: boolean; authorityUnknown: boolean; databaseExists: boolean; databaseReadable: boolean; backupAvailable: boolean; orphanedConnections: number; message: string };
 type ProfileBackupResult = { backupPath: string; createdAt: number };
 type ProfileBackupSummary = { path: string; createdAt: number; sourceSchemaVersion: number; applicationVersion: string };
+type BuildProvenance = { applicationVersion: string; channel: string; sourceRevision: string; buildEpoch: number; tauriVersion: string; rustcVersion: string; operatingSystem: string; architecture: string };
+type SupportReport = { formatVersion: number; generatedAt: number; build: BuildProvenance; profile: { storeState: string; schemaVersion: number | null; migrationState: string; recoveryState: string; synchronizationState: string; errorClass: string | null }; includedCategories: string[] };
+type SupportExportResult = { path: string; generatedAt: number };
 type PlaidSyncResult = { changed: number; pendingConnections: number; statuses: string[] };
 type TradeStationConnectionStatus = { status: "not_connected" | "preparing" | "waiting_for_browser" | "exchanging" | "connected" | "failed"; message: string; connectionId: string | null };
 type View = "dashboard" | "ledger" | "calendar" | "scheduled" | "accounts" | "investments" | "scenarios" | "settings";
@@ -332,12 +335,19 @@ function SettingsView({ sandboxEnabled, onOpenInvestments, categories, onCategor
   const [backupError, setBackupError] = useState<string | null>(null);
   const [backups, setBackups] = useState<ProfileBackupSummary[]>([]);
   const [selectedBackup, setSelectedBackup] = useState("");
+  const [supportReport, setSupportReport] = useState<SupportReport | null>(null);
+  const [supportExport, setSupportExport] = useState<SupportExportResult | null>(null);
+  const [supportBusy, setSupportBusy] = useState(false);
+  const [supportError, setSupportError] = useState<string | null>(null);
   async function refreshBackups() {
     const available = await invoke<ProfileBackupSummary[]>("list_profile_backups");
     setBackups(available);
     setSelectedBackup(current => available.some(item => item.path === current) ? current : available[0]?.path ?? "");
   }
-  useEffect(() => { void refreshBackups().catch((reason: unknown) => setBackupError(String(reason))); }, []);
+  useEffect(() => {
+    void refreshBackups().catch((reason: unknown) => setBackupError(String(reason)));
+    void invoke<SupportReport>("support_report_preview").then(setSupportReport).catch((reason: unknown) => setSupportError(String(reason)));
+  }, []);
   async function createBackup() {
     setBackupBusy(true); setBackupError(null);
     try { setBackupResult(await invoke<ProfileBackupResult>("export_profile_backup")); await refreshBackups(); }
@@ -350,9 +360,16 @@ function SettingsView({ sandboxEnabled, onOpenInvestments, categories, onCategor
     try { await invoke("restore_profile_backup", { backupPath: selectedBackup }); window.location.reload(); }
     catch (reason) { setBackupError(String(reason)); setBackupBusy(false); }
   }
+  async function saveSupportReport() {
+    setSupportBusy(true); setSupportError(null);
+    try { setSupportExport(await invoke<SupportExportResult>("export_support_report")); }
+    catch (reason) { setSupportError(String(reason)); }
+    finally { setSupportBusy(false); }
+  }
   return <div className="settings-grid">
     <Widget title="External connections" className="settings-connections"><div className="connection-setting"><div><strong>TradeStation</strong><small>Direct read-only OAuth connection for brokerage balances, positions, and market data.</small><p>Client secret and OAuth refresh token remain in the dedicated Cloudflare TradeStation broker. Money Map receives imported investment records only.</p></div>{sandboxEnabled ? <TradeStationSimConnection compact /> : <button className="primary-action" onClick={onOpenInvestments}>View investment setup</button>}</div><div className="connection-setting"><div><strong>Banking and retirement institutions</strong><small>Plaid handles supported accounts, including eligible investment accounts.</small><p>Connect and manage supported institutions through Accounts & cards.</p></div></div></Widget>
     <Widget title="Local profile" className="settings-profile"><strong>Money Map profile</strong><p>This desktop profile is local to this Windows user. Financial records are encrypted locally.</p><div className="settings-backup-actions"><button className="primary-action" disabled={backupBusy} onClick={() => void createBackup()}>{backupBusy ? "Working…" : "Create encrypted backup"}</button>{backups.length ? <><label>Available encrypted backups<select value={selectedBackup} disabled={backupBusy} onChange={event => setSelectedBackup(event.target.value)}>{backups.map(item => <option key={item.path} value={item.path}>{new Date(item.createdAt * 1000).toLocaleString()} · schema {item.sourceSchemaVersion} · Money Map {item.applicationVersion}</option>)}</select></label><button disabled={backupBusy || !selectedBackup} onClick={() => void restoreSelectedBackup()}>Restore selected backup</button></> : <small>No compatible backups are available for this profile.</small>}{backupResult ? <p className="backup-result"><strong>Backup created</strong><span>{backupResult.backupPath}</span></p> : null}{backupError ? <p className="form-error">{backupError}</p> : null}</div><small>Backups remain SQLCipher-encrypted and use the database key protected by this Windows profile. Money Map never deletes backups or pre-restore archives automatically.</small></Widget>
+    <Widget title="About & support" className="settings-support">{supportReport ? <><div className="build-details"><div><small>Version</small><strong>{supportReport.build.applicationVersion}</strong></div><div><small>Channel</small><strong>{supportReport.build.channel}</strong></div><div><small>Revision</small><strong><code>{supportReport.build.sourceRevision}</code></strong></div><div><small>Built</small><strong>{supportReport.build.buildEpoch ? new Date(supportReport.build.buildEpoch * 1000).toLocaleString() : "Unknown"}</strong></div><div><small>Runtime</small><strong>Tauri {supportReport.build.tauriVersion} · {supportReport.build.rustcVersion} · {supportReport.build.operatingSystem} {supportReport.build.architecture}</strong></div><div><small>Profile schema</small><strong>{supportReport.profile.schemaVersion ?? "Unavailable"} · {supportReport.profile.migrationState.replaceAll("_", " ")}</strong></div></div><div className="support-preview"><strong>Support report preview</strong><p>The saved report contains only these categories:</p><ul>{supportReport.includedCategories.map(category => <li key={category}>{category}</li>)}</ul><small>It excludes transaction descriptions and amounts, account names and masks, personal names, absolute paths, database contents and keys, connection identifiers and secrets, provider request bodies, and raw log messages.</small></div><button className="secondary-action" disabled={supportBusy} onClick={() => void saveSupportReport()}>{supportBusy ? "Saving…" : "Save privacy-safe support report"}</button>{supportExport ? <p className="support-result"><strong>Support report saved</strong><span>{supportExport.path}</span></p> : null}</> : <p className="empty-copy">Loading build and support information…</p>}{supportError ? <p className="form-error">{supportError}</p> : null}</Widget>
     <Widget title="Categories" className="settings-categories"><CategoryManager categories={categories} onCreated={onCategoryCreated} /></Widget>
   </div>;
 }

@@ -24,6 +24,8 @@ Build the React surface from `apps/desktop`:
 npm run build
 ```
 
+Support-report tests seed recognizable canaries as account, transaction, institution, connection, secret, amount, mask, and path values. Serialization must omit every canary while retaining build provenance, schema version, and coarse synchronization state. The report is an allowlist and never ingests `money-map.log`.
+
 Validate the versioned AI capability contracts from the repository root:
 
 ```powershell
