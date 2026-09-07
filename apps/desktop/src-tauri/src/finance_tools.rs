@@ -1,6 +1,7 @@
 use rusqlite::{params_from_iter, types::Value, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -204,23 +205,82 @@ pub fn list_capabilities(actor: &Actor) -> Result<Vec<CapabilityDescriptor>, Fin
             action_class: ActionClass::Read,
             required_scopes: vec![RecordScope::RecurringAnalysis, RecordScope::Schedules],
             request_schema: json!({ "type": "object", "description": "Bounded deterministic evidence scan" }),
-            result_schema: envelope,
+            result_schema: envelope.clone(),
             pagination: None,
             freshness: "derived from cited transaction observations at query time".to_owned(),
             consistency: "bounded local snapshot; candidate order is deterministic".to_owned(),
             idempotency: "safe deterministic read for unchanged records".to_owned(),
             deprecated: false,
         },
+        CapabilityDescriptor {
+            name: "finance.proposals.create_schedule".to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            capability_version: CAPABILITY_VERSION.to_owned(),
+            action_class: ActionClass::Propose,
+            required_scopes: vec![RecordScope::Proposals, RecordScope::Schedules],
+            request_schema: json!({ "type": "object", "description": "Persist an inert schedule create or update proposal" }),
+            result_schema: envelope.clone(),
+            pagination: None,
+            freshness: "proposal binds exact evidence and content-hash preconditions at creation".to_owned(),
+            consistency: "proposal persistence and creation audit are atomic".to_owned(),
+            idempotency: "caller key replays the identical proposal and rejects payload drift".to_owned(),
+            deprecated: false,
+        },
+        CapabilityDescriptor {
+            name: "finance.proposals.get".to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            capability_version: CAPABILITY_VERSION.to_owned(),
+            action_class: ActionClass::Read,
+            required_scopes: vec![RecordScope::Proposals],
+            request_schema: json!({ "type": "object", "description": "Read one proposal and refresh expiry" }),
+            result_schema: envelope.clone(),
+            pagination: None,
+            freshness: "current persisted lifecycle state".to_owned(),
+            consistency: "expiry transition and audit are atomic".to_owned(),
+            idempotency: "safe read; first read after expiry records the expiry transition".to_owned(),
+            deprecated: false,
+        },
+        CapabilityDescriptor {
+            name: "finance.proposals.reject".to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            capability_version: CAPABILITY_VERSION.to_owned(),
+            action_class: ActionClass::Propose,
+            required_scopes: vec![RecordScope::Proposals],
+            request_schema: json!({ "type": "object", "description": "Reject the exact current proposal version" }),
+            result_schema: envelope.clone(),
+            pagination: None,
+            freshness: "version checked at transition".to_owned(),
+            consistency: "rejection and audit are atomic".to_owned(),
+            idempotency: "terminal rejection cannot be applied twice".to_owned(),
+            deprecated: false,
+        },
+        CapabilityDescriptor {
+            name: "finance.proposals.execute_confirmed".to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            capability_version: CAPABILITY_VERSION.to_owned(),
+            action_class: ActionClass::Execute,
+            required_scopes: vec![RecordScope::Proposals, RecordScope::Schedules],
+            request_schema: json!({ "type": "object", "description": "Execute one exact native-confirmed proposal" }),
+            result_schema: envelope,
+            pagination: None,
+            freshness: "confirmation, expiry, and record preconditions revalidated at execution".to_owned(),
+            consistency: "schedule mutation, lifecycle transition, outcome, and audit are atomic".to_owned(),
+            idempotency: "caller key returns the original outcome without repeating the mutation".to_owned(),
+            deprecated: false,
+        },
     ])
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecordKind {
     Transaction,
     Schedule,
     Account,
     Category,
+    Proposal,
+    Audit,
+    Profile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -228,16 +288,29 @@ pub enum RecordKind {
 pub struct RecordRef {
     pub kind: RecordKind,
     pub id: String,
+    pub version: String,
 }
 
-fn record_ref(kind: RecordKind, local_id: String) -> RecordRef {
+pub(crate) fn content_version(parts: &[&str]) -> String {
+    let mut digest = Sha256::new();
+    for part in parts {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+pub(crate) fn record_ref(kind: RecordKind, local_id: String, version: String) -> RecordRef {
     let kind_name = match kind {
         RecordKind::Transaction => "transaction",
         RecordKind::Schedule => "schedule",
         RecordKind::Account => "account",
         RecordKind::Category => "category",
+        RecordKind::Proposal => "proposal",
+        RecordKind::Audit => "audit",
+        RecordKind::Profile => "profile",
     };
-    RecordRef { kind, id: format!("money-map:{kind_name}:{local_id}") }
+    RecordRef { kind, id: format!("money-map:{kind_name}:{local_id}"), version }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,21 +475,35 @@ pub fn search_transactions(
         let category_id: Option<String> = row.get(7)?;
         let source: String = row.get(10)?;
         let synced_at: String = row.get(12)?;
+        let account_name: String = row.get(2)?;
+        let description: String = row.get(4)?;
+        let merchant_key: Option<String> = row.get(5)?;
+        let amount_cents: i64 = row.get(6)?;
+        let category_name: Option<String> = row.get(8)?;
+        let pending = row.get::<_, i64>(9)? != 0;
+        let external_record_id: Option<String> = row.get(11)?;
+        let transaction_version = content_version(&[
+            &transaction_id, &account_id, &transaction_date, &description,
+            &amount_cents.to_string(), &source, &synced_at,
+        ]);
         Ok(TransactionRecord {
-            record_ref: record_ref(RecordKind::Transaction, transaction_id),
-            account_ref: record_ref(RecordKind::Account, account_id),
-            account_name: row.get(2)?,
+            record_ref: record_ref(RecordKind::Transaction, transaction_id, transaction_version),
+            account_ref: record_ref(RecordKind::Account, account_id.clone(), content_version(&[&account_id, &account_name])),
+            account_name,
             transaction_date: transaction_date.clone(),
-            description: row.get(4)?,
-            merchant_key: row.get(5)?,
-            amount_cents: row.get(6)?,
+            description,
+            merchant_key,
+            amount_cents,
             currency: "USD".to_owned(),
-            category_ref: category_id.map(|id| record_ref(RecordKind::Category, id)),
-            category_name: row.get(8)?,
-            pending: row.get::<_, i64>(9)? != 0,
+            category_ref: category_id.map(|id| {
+                let version = content_version(&[&id, category_name.as_deref().unwrap_or("")]);
+                record_ref(RecordKind::Category, id, version)
+            }),
+            category_name,
+            pending,
             provenance: Provenance {
                 source,
-                external_record_id: row.get(11)?,
+                external_record_id,
                 observed_at: transaction_date,
                 synced_at,
             },
@@ -486,7 +573,7 @@ pub fn search_schedules(
     }
     let (limit, offset) = page_bounds(&request.page)?;
     let mut sql = format!(
-        "SELECT s.id,s.account_id,a.name,s.description,s.amount_cents,s.recurrence,s.start_date,s.end_date,{NEXT_OCCURRENCE_SQL},s.active,s.created_at \
+        "SELECT s.id,s.account_id,a.name,s.description,s.amount_cents,s.recurrence,s.start_date,s.end_date,{NEXT_OCCURRENCE_SQL},s.active,s.created_at,s.last_processed_occurrence \
          FROM scheduled_transactions s JOIN accounts a ON a.id=s.account_id WHERE 1=1"
     );
     let mut values = Vec::new();
@@ -513,19 +600,34 @@ pub fn search_schedules(
     let mut records = statement.query_map(params_from_iter(values.iter()), |row| {
         let schedule_id: String = row.get(0)?;
         let account_id: String = row.get(1)?;
+        let account_name: String = row.get(2)?;
+        let description: String = row.get(3)?;
+        let amount_cents: i64 = row.get(4)?;
+        let recurrence: String = row.get(5)?;
+        let start_date: String = row.get(6)?;
+        let end_date: Option<String> = row.get(7)?;
+        let next_occurrence: String = row.get(8)?;
+        let active = row.get::<_, i64>(9)? != 0;
+        let created_at: String = row.get(10)?;
+        let last_processed_occurrence: Option<String> = row.get(11)?;
+        let version = content_version(&[
+            &schedule_id, &account_id, &description, &amount_cents.to_string(), &recurrence,
+            &start_date, end_date.as_deref().unwrap_or(""), &active.to_string(),
+            last_processed_occurrence.as_deref().unwrap_or(""), &created_at,
+        ]);
         Ok(ScheduleRecord {
-            record_ref: record_ref(RecordKind::Schedule, schedule_id),
-            account_ref: record_ref(RecordKind::Account, account_id),
-            account_name: row.get(2)?,
-            description: row.get(3)?,
-            amount_cents: row.get(4)?,
+            record_ref: record_ref(RecordKind::Schedule, schedule_id, version),
+            account_ref: record_ref(RecordKind::Account, account_id.clone(), content_version(&[&account_id, &account_name])),
+            account_name,
+            description,
+            amount_cents,
             currency: "USD".to_owned(),
-            recurrence: row.get(5)?,
-            start_date: row.get(6)?,
-            end_date: row.get(7)?,
-            next_occurrence: row.get(8)?,
-            active: row.get::<_, i64>(9)? != 0,
-            created_at: row.get(10)?,
+            recurrence,
+            start_date,
+            end_date,
+            next_occurrence,
+            active,
+            created_at,
         })
     }).map_err(|error| storage("query schedules", error))?
       .collect::<Result<Vec<_>, _>>().map_err(|error| storage("read schedules", error))?;
@@ -620,6 +722,7 @@ struct DetectionRow {
     party_key: String,
     amount_cents: i64,
     source: String,
+    version: String,
 }
 
 fn normalized_party(value: &str) -> String {
@@ -671,7 +774,7 @@ pub fn detect_recurring(
     let posted_predicate = if transactions_has_column(connection, "pending")? { " AND t.pending=0" } else { "" };
     let mut sql = format!(
         "SELECT t.id,t.account_id,a.name,t.transaction_date,CAST(julianday(t.transaction_date) AS INTEGER),\
-         t.description,{party_expression},t.amount_cents,t.source \
+         t.description,{party_expression},t.amount_cents,t.source,t.updated_at \
          FROM transactions t JOIN accounts a ON a.id=t.account_id \
          WHERE t.source <> 'scheduled'{posted_predicate}"
     );
@@ -688,10 +791,18 @@ pub fn detect_recurring(
     let mut statement = connection.prepare(&sql).map_err(|error| storage("prepare recurring detection", error))?;
     let mut rows = statement.query_map(params_from_iter(values.iter()), |row| {
         let raw_party: String = row.get(6)?;
+        let id: String = row.get(0)?;
+        let account_id: String = row.get(1)?;
+        let date: String = row.get(3)?;
+        let description: String = row.get(5)?;
+        let amount_cents: i64 = row.get(7)?;
+        let source: String = row.get(8)?;
+        let updated_at: String = row.get(9)?;
+        let version = content_version(&[&id, &account_id, &date, &description, &amount_cents.to_string(), &source, &updated_at]);
         Ok(DetectionRow {
-            id: row.get(0)?, account_id: row.get(1)?, account_name: row.get(2)?, date: row.get(3)?,
-            day_number: row.get(4)?, description: row.get(5)?, party_key: normalized_party(&raw_party),
-            amount_cents: row.get(7)?, source: row.get(8)?,
+            id, account_id, account_name: row.get(2)?, date,
+            day_number: row.get(4)?, description, party_key: normalized_party(&raw_party),
+            amount_cents, source, version,
         })
     }).map_err(|error| storage("query recurring detection", error))?
       .collect::<Result<Vec<_>, _>>().map_err(|error| storage("read recurring observations", error))?;
@@ -737,21 +848,25 @@ pub fn detect_recurring(
         } else { None };
         let match_tolerance = std::cmp::max(500_i64, median_amount.unsigned_abs().saturating_div(10).min(i64::MAX as u64) as i64);
         let matching_schedule_refs = schedules.iter().filter(|schedule| {
-            if schedule.account_ref != record_ref(RecordKind::Account, last.account_id.clone()) { return false; }
+            if schedule.account_ref.id != format!("money-map:account:{}", last.account_id) { return false; }
             let schedule_party = normalized_party(&schedule.description);
             let party_match = schedule_party == party_key || schedule_party.contains(&party_key) || party_key.contains(&schedule_party);
             party_match && schedule.amount_cents.abs_diff(median_amount) <= match_tolerance as u64
         }).map(|schedule| schedule.record_ref.clone()).collect::<Vec<_>>();
         let display_name = last.description.clone();
         let evidence = observations.iter().map(|row| RecurringObservation {
-            transaction_ref: record_ref(RecordKind::Transaction, row.id.clone()),
+            transaction_ref: record_ref(RecordKind::Transaction, row.id.clone(), row.version.clone()),
             transaction_date: row.date.clone(), amount_cents: row.amount_cents,
             description: row.description.clone(), source: row.source.clone(),
         }).collect();
         candidates.push(RecurringCandidate {
             party_key,
             display_name,
-            account_ref: record_ref(RecordKind::Account, last.account_id.clone()),
+            account_ref: record_ref(
+                RecordKind::Account,
+                last.account_id.clone(),
+                content_version(&[&last.account_id, &last.account_name]),
+            ),
             account_name: last.account_name.clone(),
             recurrence: recurrence.to_owned(),
             next_expected_date,

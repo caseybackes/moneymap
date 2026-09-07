@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::{fs, path::{Path, PathBuf}, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 pub const BACKUP_FORMAT_VERSION: u32 = 1;
-pub const CURRENT_SCHEMA_VERSION: u32 = 10;
+pub const CURRENT_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

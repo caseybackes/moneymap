@@ -1,6 +1,6 @@
 # Money Map AI capability architecture
 
-Status: proposed for Linear ID-91
+Status: read capabilities and schedule proposal lifecycle implemented through Linear ID-111
 Contract generation: `docs/ai-tools/schemas/v1/`
 
 ## Security and ownership boundary
@@ -88,3 +88,5 @@ Every response identifies the contract and capability versions. Financial values
 - Tauri commands: thin serialization adapters for the React harness.
 - stdio MCP binary or subcommand: descriptor generation plus request translation to the native layer.
 - CI: JSON Schema validation, fixtures, compatibility checks, redaction tests, and mutation-safety assertions.
+
+The implemented schedule mutation protocol and its downstream UI contract are documented in [`PROPOSAL-LIFECYCLE.md`](PROPOSAL-LIFECYCLE.md).

@@ -53,6 +53,8 @@ These commands use an existing-profile-only SQLCipher opener. It refuses a missi
 
 The proposed contracts, threat model, and MCP adapter decision are under [`docs/ai-tools/`](ai-tools/). MCP remains a later optional stdio adapter over the native registry; it does not own financial domain logic.
 
+Schedule mutations use schema migration 11 and the persisted lifecycle described in [`docs/ai-tools/PROPOSAL-LIFECYCLE.md`](ai-tools/PROPOSAL-LIFECYCLE.md). Keep confirmation out of agent-facing registries: only the native user-confirmation adapter may mint the two-minute artifact bound to the profile, proposal version, and effect digest. Execution must remain one immediate transaction covering precondition checks, schedule mutation, artifact consumption, audit, and idempotent outcome.
+
 ## Tests
 
 From `apps/desktop/src-tauri`:

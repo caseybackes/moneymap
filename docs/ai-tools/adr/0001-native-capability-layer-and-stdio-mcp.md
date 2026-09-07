@@ -1,6 +1,6 @@
 # ADR 0001: Native capability layer with optional stdio MCP adapter
 
-- Status: Proposed
+- Status: Accepted; native read and schedule proposal layers implemented
 - Date: 2026-08-21
 - Linear: ID-91
 
@@ -56,7 +56,7 @@ Remote authentication, transport security, discovery, and lifecycle management a
 
 ## Follow-up decisions
 
-- Select the persisted record-version mechanism and audit-event representation.
+- Content-hash record preconditions and append-only, minimized lifecycle audit events were selected in ID-111; see [`PROPOSAL-LIFECYCLE.md`](../PROPOSAL-LIFECYCLE.md).
 - Define how an MCP process obtains a profile-bound actor grant without exposing profile secrets.
 - Specify schema compatibility checks and capability deprecation windows.
 - Decide whether minimized external statement facts may be imported as encrypted evidence records.
