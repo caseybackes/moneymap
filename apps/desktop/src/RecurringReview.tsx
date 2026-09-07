@@ -209,9 +209,8 @@ export function RecurringReview({ onExecuted }: { onExecuted: () => void }) {
   }
 
   return <section className="widget recurring-review" aria-labelledby="recurring-review-title">
-    <header className="widget-header"><div><h2 id="recurring-review-title">Possible recurring transactions</h2><small>Repeated charges that are not in your schedule</small></div><button className="icon-action" aria-label="Refresh recurring transactions" disabled={loading || busy} onClick={() => void load()}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" /></button></header>
+    <header className="widget-header"><div><h2 id="recurring-review-title">Recurring</h2><small>{loading ? "Checking transactions…" : `${candidates.length} not scheduled`}</small></div><button className="icon-action" aria-label="Refresh recurring transactions" disabled={loading || busy} onClick={() => void load()}><RefreshCw className={loading ? "spin" : ""} aria-hidden="true" /></button></header>
     {notice ? <p className="recurring-notice" role="status">{notice}</p> : null}
-    {result?.truncated ? <p className="recurring-limit" role="status">Showing up to {dashboardRecurringRequest.maximumCandidates} matches from the latest {dashboardRecurringRequest.scanLimit} transactions.</p> : null}
     {result?.warnings.length ? <p className="recurring-warning" role="alert">{result.warnings.join(" ")}</p> : null}
     {loading ? <p className="recurring-state" role="status"><LoaderCircle className="spin" aria-hidden="true" /> Checking recent transactions…</p> : null}
     {!loading && error && !selected ? <div className="recurring-state recurring-error" role="alert"><span>{error}</span><button onClick={() => void load()}>Try again</button></div> : null}
@@ -220,9 +219,9 @@ export function RecurringReview({ onExecuted }: { onExecuted: () => void }) {
       const key = `${candidate.accountRef.id}:${candidate.partyKey}`;
       const canDraft = Boolean(candidate.nextExpectedDate && ["weekly", "biweekly", "monthly", "quarterly", "yearly"].includes(candidate.recurrence));
       return <article className="recurring-candidate" key={key}>
-        <div className="recurring-summary"><div><strong>{candidate.displayName}</strong><small>{candidate.accountName} · {cadenceLabel(candidate.recurrence)} · last seen {latestEvidenceDate(candidate) || "unknown"}</small></div></div>
-        <div className="candidate-metrics"><span><small>Amount</small><strong>{formatMoney(candidate.amountDistribution.medianCents)}</strong></span><span><small>Next date</small><strong>{candidate.nextExpectedDate}</strong></span></div>
-        <details className="candidate-evidence"><summary>Transactions used <ChevronDown aria-hidden="true" /></summary>{candidate.evidence.map(item => <div key={item.transactionRef.id}><span>{item.transactionDate} · {item.description} · {item.source}</span><strong>{formatMoney(item.amountCents)}</strong></div>)}</details>
+        <div className="recurring-summary"><strong>{candidate.displayName}</strong><small>{candidate.accountName} · {cadenceLabel(candidate.recurrence)} · last seen {latestEvidenceDate(candidate) || "unknown"}</small></div>
+        <div className="candidate-values"><span><small>Amount</small><strong>{formatMoney(candidate.amountDistribution.medianCents)}</strong></span><span><small>Next</small><strong>{candidate.nextExpectedDate}</strong></span></div>
+        <details className="candidate-evidence"><summary aria-label={`Show transactions used for ${candidate.displayName}`}><ChevronDown aria-hidden="true" /></summary><div className="candidate-evidence-list">{candidate.evidence.map(item => <div key={item.transactionRef.id}><span>{item.transactionDate} · {item.description} · {item.source}</span><strong>{formatMoney(item.amountCents)}</strong></div>)}</div></details>
         <footer><button onClick={() => dismiss(candidate)}><X aria-hidden="true" />Dismiss</button><button disabled={!canDraft} onClick={() => open(candidate)}><Pencil aria-hidden="true" />Edit</button><button className="primary-action" disabled={!canDraft} onClick={() => open(candidate)}><Plus aria-hidden="true" />Add schedule</button></footer>
       </article>;
     })}</div> : null}

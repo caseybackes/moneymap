@@ -155,12 +155,16 @@ html,body,#root{height:100%;overflow:hidden}body{min-height:0}.app-shell{grid-te
 
 /* Dashboard density: widgets summarize; records use bounded, compact rows. */
 .widget-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.widget-header h2{margin:0}
+.dashboard-lower{grid-column:1/-1;display:grid;grid-template-columns:minmax(0,1.08fr) minmax(340px,.92fr);gap:16px;align-items:start}
+.dashboard-side-stack{min-width:0;display:grid;gap:16px;align-content:start}
+.dashboard-lower .accounts-widget,.dashboard-lower .upcoming-widget{grid-column:auto}
 .widget-link{display:inline-flex;align-items:center;gap:3px;padding:4px 5px;border:0;border-radius:5px;background:transparent;color:#9fc8ea;cursor:pointer;font-size:12px}.widget-link:hover{background:#223044;color:#e8f4ff}.widget-link svg{width:14px;height:14px}
 .widget-link:focus-visible,.suggestion-row .icon-action:focus-visible,.dashboard-account-list .account-card:focus-visible{outline:2px solid #67d4ff;outline-offset:2px}
 .dashboard-account-list{display:grid;gap:0}.dashboard-account-list .account-card{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"type balance" "name balance";align-items:center;gap:3px 18px;width:100%;min-height:58px;padding:9px 2px;border:0;border-bottom:1px solid #2b3a4e;border-radius:0;background:transparent}.dashboard-account-list .account-card:nth-child(n+7){display:none}.dashboard-account-list .account-card:hover{background:#1d2937}.dashboard-account-list .account-card small{grid-area:type}.dashboard-account-list .account-card h3{grid-area:name;margin:0;font-size:13px}.dashboard-account-list .account-card>strong{grid-area:balance;font-size:15px;text-align:right}.dashboard-account-list .account-card em{display:none}
 .suggestion-list{gap:0}.suggestion-row{min-height:52px;padding:8px 2px;border:0;border-bottom:1px solid #2b3a4e;border-radius:0;background:transparent}.suggestion-row:last-child{border-bottom:0}.suggestion-row>div{min-width:0}.suggestion-row>div>strong,.suggestion-row small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.inline-actions{display:flex;gap:4px;flex:none}.suggestion-row .icon-action{display:grid;place-items:center;width:30px;height:30px;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;color:#9eafc4;cursor:pointer}.suggestion-row .icon-action:hover{background:#253246;border-color:#40556d;color:#f3f7fb}.suggestion-row .icon-action.emphasized{color:#67d4ff}.suggestion-row .icon-action svg{width:16px;height:16px}
 .accounts-widget,.recent-widget,.upcoming-widget,.suggestions-widget{min-height:0}.accounts-widget{align-self:start}
 @media(min-width:1051px){.accounts-widget{grid-column:1}.upcoming-widget,.suggestions-widget{grid-column:2}.suggestions-widget{align-self:start}}
+@media(max-width:1050px){.dashboard-lower{grid-template-columns:1fr}}
 
 /* Shared compact interaction and density system. */
 .page{padding:28px 32px 48px}

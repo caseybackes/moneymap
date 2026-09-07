@@ -28,6 +28,25 @@ for (const file of files) {
   }
 }
 
+const appSource = readFileSync(join(sourceRoot, "App.tsx"), "utf8");
+const recurringSource = readFileSync(join(sourceRoot, "RecurringReview.tsx"), "utf8");
+const dashboardCss = readFileSync(join(sourceRoot, "styles.css"), "utf8");
+const recurringCss = readFileSync(join(sourceRoot, "recurring-review.css"), "utf8");
+const requiredDashboardContracts = [
+  [appSource, 'className="dashboard-lower"', "dashboard lower region"],
+  [appSource, 'className="dashboard-side-stack"', "dashboard side stack"],
+  [recurringSource, 'className="candidate-values"', "compact recurring values"],
+  [dashboardCss, ".dashboard-lower{", "two-column lower dashboard layout"],
+  [recurringCss, ".recurring-candidate:hover>footer", "pointer action reveal"],
+  [recurringCss, ".recurring-candidate:focus-within>footer", "keyboard action reveal"],
+  [recurringCss, "@media(hover:none)", "touch action fallback"],
+  [recurringCss, "max-height:250px", "bounded recurring list"],
+];
+
+for (const [source, token, description] of requiredDashboardContracts) {
+  if (!source.includes(token)) findings.push(`dashboard interaction contract: missing ${description}`);
+}
+
 if (findings.length) {
   console.error("UI copy check failed:\n" + findings.map(finding => `- ${finding}`).join("\n"));
   process.exit(1);
