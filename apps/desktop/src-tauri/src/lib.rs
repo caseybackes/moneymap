@@ -11,10 +11,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::io::Write;
+use std::process::Command;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 #[cfg(feature = "sandbox-dev")]
-use std::{io::Read, net::TcpListener, process::Command, sync::Arc, thread, time::{Duration, Instant}};
+use std::{io::Read, net::TcpListener, sync::Arc, thread, time::{Duration, Instant}};
 #[cfg(feature = "sandbox-dev")]
 use url::Url;
 
@@ -248,6 +249,21 @@ struct LedgerData {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct BalanceHistoryPoint {
+    date: String,
+    balance_cents: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountBalanceHistory {
+    points: Vec<BalanceHistoryPoint>,
+    as_of: String,
+    estimated: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ScheduledEntry { id: String, account_id: String, start_date: String, end_date: Option<String>, next_occurrence: String, description: String, amount_cents: i64, recurrence: String, account_name: String }
 
 #[derive(Serialize)]
@@ -269,6 +285,14 @@ struct SandboxLinkSession {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct PlaidAccountUpdateSession {
+    link_token: String,
+    connection_id: String,
+    expiration: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PlaidSyncResult {
     changed: usize,
     pending_connections: usize,
@@ -283,6 +307,13 @@ struct CompleteSandboxLinkInput {
     public_token: String,
     institution_id: Option<String>,
     institution_name: Option<String>,
+    selected_account_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompletePlaidAccountUpdateInput {
+    connection_id: String,
     selected_account_ids: Vec<String>,
 }
 
@@ -316,6 +347,14 @@ struct UpdateTransactionInput {
     amount_cents: i64,
     category_id: Option<String>,
     notes: Option<String>,
+    category_scope: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CategorizationMatch {
+    merchant_key: String,
+    matching_transactions: i64,
 }
 
 #[derive(Serialize)]
@@ -334,6 +373,30 @@ fn new_id() -> String {
     let mut bytes = [0_u8; 16];
     rand::rng().fill_bytes(&mut bytes);
     STANDARD_NO_PAD.encode(bytes)
+}
+
+/// Produces a stable, local merchant identity from provider merchant names or
+/// statement descriptions. Numeric/reference fragments are intentionally
+/// discarded so values such as `Uber 063015 SF**POOL**` and
+/// `Uber 072515 SF**POOL**` resolve to the same merchant family.
+fn normalized_merchant_key(value: &str) -> String {
+    const GENERIC_PREFIXES: &[&str] = &[
+        "ACH", "CARD", "CHECK", "CREDIT", "DEBIT", "DIRECT", "ONLINE",
+        "PAYMENT", "POS", "PURCHASE", "RECURRING", "TRANSFER",
+    ];
+    let tokens: Vec<String> = value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty() && !token.chars().any(|character| character.is_ascii_digit()))
+        .map(str::to_ascii_uppercase)
+        .collect();
+    if tokens.is_empty() {
+        return value.trim().to_ascii_uppercase();
+    }
+    if GENERIC_PREFIXES.contains(&tokens[0].as_str()) {
+        tokens.into_iter().take(4).collect::<Vec<_>>().join(" ")
+    } else {
+        tokens[0].clone()
+    }
 }
 
 fn database_key(database_exists: bool) -> Result<String, String> {
@@ -632,6 +695,43 @@ fn write_diagnostic(app: &AppHandle, event: &str) {
     let _ = writeln!(file, "{timestamp} {event}");
 }
 
+fn open_external_https(app: &AppHandle, url: &url::Url) -> Result<(), String> {
+    if url.scheme() != "https" {
+        write_diagnostic(app, &format!("blocked external navigation scheme={}", url.scheme()));
+        return Err("Only secure external links may be opened.".into());
+    }
+    let host = url.host_str().unwrap_or("unknown");
+    write_diagnostic(app, &format!("external browser handoff requested host={host}"));
+    #[cfg(target_os = "windows")]
+    let result = Command::new("rundll32.exe")
+        .arg("url.dll,FileProtocolHandler")
+        .arg(url.as_str())
+        .spawn();
+    #[cfg(target_os = "linux")]
+    let result = Command::new("xdg-open").arg(url.as_str()).spawn();
+    #[cfg(target_os = "macos")]
+    let result = Command::new("open").arg(url.as_str()).spawn();
+    result
+        .map(|_| write_diagnostic(app, &format!("external browser handoff started host={host}")))
+        .map_err(|error| {
+            write_diagnostic(app, &format!("external browser handoff failed host={host} error={error}"));
+            format!("Could not open the financial institution in your browser: {error}")
+        })
+}
+
+fn create_main_window(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let config = app.config().app.windows.first().cloned()
+        .ok_or("Money Map main-window configuration is missing")?;
+    let app_handle = app.handle().clone();
+    tauri::WebviewWindowBuilder::from_config(app, &config)?
+        .on_new_window(move |url, _features| {
+            let _ = open_external_https(&app_handle, &url);
+            tauri::webview::NewWindowResponse::Deny
+        })
+        .build()?;
+    Ok(())
+}
+
 fn open_database(app: &AppHandle) -> Result<(Connection, String), String> {
     let result = open_database_inner(app);
     match &result {
@@ -699,6 +799,7 @@ fn open_database_inner(app: &AppHandle) -> Result<(Connection, String), String> 
            notes TEXT,
            source TEXT NOT NULL DEFAULT 'manual',
            external_transaction_id TEXT,
+           pending INTEGER NOT NULL DEFAULT 0,
            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
            UNIQUE(source, external_transaction_id)
@@ -825,6 +926,55 @@ fn open_database_inner(app: &AppHandle) -> Result<(Connection, String), String> 
     }
     connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (7)", [])
         .map_err(|error| error.to_string())?;
+    let has_merchant_key: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('transactions') WHERE name = 'merchant_key')",
+        [],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !has_merchant_key {
+        connection.execute_batch(
+            "ALTER TABLE transactions ADD COLUMN merchant_key TEXT;
+             CREATE INDEX IF NOT EXISTS transactions_merchant_key ON transactions(merchant_key);"
+        ).map_err(|error| error.to_string())?;
+        let descriptions = {
+            let mut statement = connection.prepare("SELECT id, description FROM transactions")
+                .map_err(|error| error.to_string())?;
+            let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+            rows
+        };
+        for (id, description) in descriptions {
+            connection.execute(
+                "UPDATE transactions SET merchant_key = ?1 WHERE id = ?2",
+                (normalized_merchant_key(&description), id),
+            ).map_err(|error| error.to_string())?;
+        }
+    }
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS categorization_rules (
+           id TEXT PRIMARY KEY NOT NULL,
+           merchant_key TEXT NOT NULL UNIQUE,
+           category_id TEXT NOT NULL REFERENCES categories(id),
+           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+           updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+         );
+         INSERT OR IGNORE INTO schema_migrations(version) VALUES (8);"
+    ).map_err(|error| error.to_string())?;
+    let has_pending_status: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('transactions') WHERE name = 'pending')",
+        [],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !has_pending_status {
+        connection.execute_batch(
+            "ALTER TABLE transactions ADD COLUMN pending INTEGER NOT NULL DEFAULT 0;
+             INSERT OR IGNORE INTO schema_migrations(version) VALUES (9);"
+        ).map_err(|error| error.to_string())?;
+    } else {
+        connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (9)", [])
+            .map_err(|error| error.to_string())?;
+    }
     let identity = profile_id()?;
     profile_backup::ensure_profile_metadata(&connection, &identity, PLAID_ENVIRONMENT)?;
     connection.execute("INSERT OR IGNORE INTO schema_migrations(version) VALUES (10)", []).map_err(|error| error.to_string())?;
@@ -1144,11 +1294,12 @@ fn create_transaction(app: AppHandle, input: CreateTransactionInput) -> Result<S
         .map_err(|error| error.to_string())?;
     if !exists { return Err("Choose an existing account.".into()); }
     let id = new_id();
+    let merchant_key = normalized_merchant_key(input.description.trim());
     let transaction = connection.unchecked_transaction().map_err(|error| error.to_string())?;
     transaction.execute(
-        "INSERT INTO transactions(id, account_id, transaction_date, description, amount_cents, category_id, notes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        (&id, &input.account_id, &input.transaction_date, input.description.trim(), input.amount_cents, input.category_id, input.notes),
+        "INSERT INTO transactions(id, account_id, transaction_date, description, amount_cents, category_id, notes, merchant_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        (&id, &input.account_id, &input.transaction_date, input.description.trim(), input.amount_cents, input.category_id, input.notes, merchant_key),
     ).map_err(|error| error.to_string())?;
     if let Some(recurrence) = input.schedule_recurrence.as_deref() {
         let modifier = match recurrence {
@@ -1182,13 +1333,57 @@ fn update_transaction(app: AppHandle, input: UpdateTransactionInput) -> Result<(
     if !input.transaction_date.chars().all(|character| character.is_ascii_digit() || character == '-') || input.transaction_date.len() != 10 {
         return Err("Transaction date must use YYYY-MM-DD.".into());
     }
-    let (connection, _) = open_database(&app)?;
-    let updated = connection.execute(
-        "UPDATE transactions SET account_id = ?1, transaction_date = ?2, description = ?3, amount_cents = ?4, category_id = ?5, notes = ?6, updated_at = CURRENT_TIMESTAMP WHERE id = ?7",
-        (&input.account_id, &input.transaction_date, input.description.trim(), input.amount_cents, input.category_id, input.notes, &input.id),
+    let (mut connection, _) = open_database(&app)?;
+    let merchant_key = normalized_merchant_key(input.description.trim());
+    let scope = input.category_scope.as_deref().unwrap_or("single");
+    if !matches!(scope, "single" | "matching" | "matching-and-future") {
+        return Err("Choose a valid category update scope.".into());
+    }
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let updated = transaction.execute(
+        "UPDATE transactions SET account_id = ?1, transaction_date = ?2, description = ?3, amount_cents = ?4, category_id = ?5, notes = ?6, merchant_key = ?7, updated_at = CURRENT_TIMESTAMP WHERE id = ?8",
+        (&input.account_id, &input.transaction_date, input.description.trim(), input.amount_cents, &input.category_id, &input.notes, &merchant_key, &input.id),
     ).map_err(|error| error.to_string())?;
     if updated != 1 { return Err("Transaction no longer exists.".into()); }
+    if scope == "matching" || scope == "matching-and-future" {
+        transaction.execute(
+            "UPDATE transactions SET category_id = ?1, updated_at = CURRENT_TIMESTAMP WHERE merchant_key = ?2",
+            (&input.category_id, &merchant_key),
+        ).map_err(|error| error.to_string())?;
+    }
+    if scope == "matching-and-future" {
+        if let Some(category_id) = input.category_id.as_deref() {
+            transaction.execute(
+                "INSERT INTO categorization_rules(id, merchant_key, category_id)
+                 VALUES(?1, ?2, ?3)
+                 ON CONFLICT(merchant_key) DO UPDATE SET category_id = excluded.category_id, updated_at = CURRENT_TIMESTAMP",
+                (new_id(), &merchant_key, category_id),
+            ).map_err(|error| error.to_string())?;
+        } else {
+            transaction.execute("DELETE FROM categorization_rules WHERE merchant_key = ?1", [&merchant_key])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn categorization_match(app: AppHandle, transaction_id: String) -> Result<CategorizationMatch, String> {
+    let (connection, _) = open_database(&app)?;
+    let description: String = connection.query_row(
+        "SELECT description FROM transactions WHERE id = ?1",
+        [&transaction_id],
+        |row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?
+        .ok_or_else(|| "Transaction no longer exists.".to_string())?;
+    let merchant_key = normalized_merchant_key(&description);
+    let matching_transactions = connection.query_row(
+        "SELECT COUNT(*) FROM transactions WHERE merchant_key = ?1",
+        [&merchant_key],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    Ok(CategorizationMatch { merchant_key, matching_transactions })
 }
 
 #[tauri::command]
@@ -1337,6 +1532,74 @@ fn finance_proposals_execute_confirmed(
     proposal_tools::execute_confirmed_schedule_proposal(
         &mut connection, &native_finance_change_actor(), &profile_id()?, &input, current_epoch_seconds()?,
     ).map_err(|error| error.to_string())
+}
+
+fn balance_transaction_direction(account_type: &str, account_subtype: Option<&str>) -> i64 {
+    let kind = account_subtype.unwrap_or(account_type).to_ascii_lowercase();
+    if matches!(kind.as_str(), "credit" | "credit card" | "loan" | "mortgage" | "student" | "student loan") {
+        -1
+    } else {
+        1
+    }
+}
+
+fn build_balance_history_points(
+    current_balance: i64,
+    as_of_date: &str,
+    direction: i64,
+    mut changes: Vec<(String, i64)>,
+) -> Vec<BalanceHistoryPoint> {
+    // A history chart is anchored to the latest observed balance. Future-dated
+    // manual activity belongs to planning and must not bend the historical
+    // series past the snapshot before returning to today.
+    changes.retain(|(date, _)| date.as_str() <= as_of_date);
+    changes.sort_by(|left, right| right.0.cmp(&left.0));
+
+    let mut balance = current_balance;
+    let mut points = vec![BalanceHistoryPoint {
+        date: as_of_date.to_string(),
+        balance_cents: balance,
+    }];
+    for (date, daily_change) in changes {
+        if points.last().is_none_or(|point| point.date != date) {
+            points.push(BalanceHistoryPoint {
+                date: date.clone(),
+                balance_cents: balance,
+            });
+        }
+        balance -= direction * daily_change;
+    }
+    points.reverse();
+    points
+}
+
+#[tauri::command]
+fn account_balance_history(app: AppHandle, account_id: String) -> Result<AccountBalanceHistory, String> {
+    let (connection, _) = open_database(&app)?;
+    let account = connection.query_row(
+        "SELECT a.type, l.plaid_account_subtype,
+                COALESCE(a.reported_balance_cents, a.opening_balance_cents + COALESCE((SELECT SUM(t.amount_cents) FROM transactions t WHERE t.account_id = a.id AND t.pending = 0), 0)),
+                COALESCE(l.balance_refreshed_at, datetime('now'))
+         FROM accounts a LEFT JOIN plaid_account_links l ON l.account_id = a.id
+         WHERE a.id = ?1",
+        [&account_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, i64>(2)?, row.get::<_, String>(3)?)),
+    ).optional().map_err(|error| error.to_string())?
+        .ok_or_else(|| "Account no longer exists.".to_string())?;
+    let (account_type, account_subtype, current_balance, as_of) = account;
+    let direction = balance_transaction_direction(&account_type, account_subtype.as_deref());
+    let mut statement = connection.prepare(
+        "SELECT transaction_date, SUM(amount_cents)
+         FROM transactions WHERE account_id = ?1 AND pending = 0
+         GROUP BY transaction_date ORDER BY transaction_date DESC"
+    ).map_err(|error| error.to_string())?;
+    let changes = statement.query_map([&account_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+
+    let as_of_date = as_of.get(0..10).unwrap_or(&as_of).to_string();
+    let points = build_balance_history_points(current_balance, &as_of_date, direction, changes);
+    Ok(AccountBalanceHistory { points, as_of, estimated: true })
 }
 
 #[tauri::command]
@@ -1626,25 +1889,35 @@ fn apply_plaid_sync_connection(connection: &mut Connection, local_connection_id:
         account_ids.insert(external_account_id.to_owned(), account_id);
     }
 
-    let source = format!("plaid-sandbox:{local_connection_id}");
+    let source = format!("plaid-{PLAID_ENVIRONMENT}:{local_connection_id}");
     let mut imported = 0;
     for item in payload["added"].as_array().into_iter().flatten().chain(payload["modified"].as_array().into_iter().flatten()) {
         let external_id = item["transaction_id"].as_str().ok_or("Sandbox transaction has no id.")?;
         let Some(account_id) = item["account_id"].as_str().and_then(|value| account_ids.get(value)) else { continue; };
         let amount = cents(&item["amount"]).ok_or("Sandbox transaction amount is invalid.")?;
+        let pending = item["pending"].as_bool().unwrap_or(false);
+        let description = item["name"].as_str().unwrap_or("Plaid transaction");
+        let merchant_key = normalized_merchant_key(item["merchant_name"].as_str().unwrap_or(description));
+        let rule_category: Option<String> = transaction.query_row(
+            "SELECT category_id FROM categorization_rules WHERE merchant_key = ?1",
+            [&merchant_key],
+            |row| row.get(0),
+        ).optional().map_err(|error| error.to_string())?;
         transaction.execute(
             "UPDATE transactions SET account_id = ?1, source = ?2
              WHERE source = 'plaid-sandbox' AND external_transaction_id = ?3",
             (account_id, &source, external_id),
         ).map_err(|error| error.to_string())?;
         transaction.execute(
-            "INSERT INTO transactions(id, account_id, transaction_date, description, amount_cents, source, external_transaction_id)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO transactions(id, account_id, transaction_date, description, amount_cents, category_id, source, external_transaction_id, merchant_key, pending)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(source, external_transaction_id) DO UPDATE SET
                account_id = excluded.account_id, transaction_date = excluded.transaction_date,
                description = excluded.description, amount_cents = excluded.amount_cents,
+               merchant_key = excluded.merchant_key, pending = excluded.pending,
+               category_id = COALESCE(transactions.category_id, excluded.category_id),
                updated_at = CURRENT_TIMESTAMP",
-            (new_id(), account_id, item["date"].as_str().unwrap_or("1970-01-01"), item["name"].as_str().unwrap_or("Plaid transaction"), -amount, &source, external_id),
+            (new_id(), account_id, item["date"].as_str().unwrap_or("1970-01-01"), description, -amount, rule_category, &source, external_id, merchant_key, pending),
         ).map_err(|error| error.to_string())?;
         imported += 1;
     }
@@ -1677,6 +1950,62 @@ async fn create_plaid_link_session(app: AppHandle) -> Result<SandboxLinkSession,
         Err(error) => write_diagnostic(&app, &format!("connection session failed error={error}")),
     }
     result
+}
+
+#[tauri::command]
+async fn create_plaid_account_update_session(app: AppHandle, connection_id: String) -> Result<PlaidAccountUpdateSession, String> {
+    let (broker_connection_id, connection_secret) = {
+        let (connection, _) = open_database(&app)?;
+        connection.query_row(
+            "SELECT broker_connection_id, connection_secret FROM plaid_connections WHERE id = ?1 AND environment = ?2",
+            (&connection_id, PLAID_ENVIRONMENT),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional().map_err(|error| error.to_string())?
+    }.ok_or("Connected institution is no longer available.")?;
+    let broker_id = broker_connection_id.clone();
+    let payload = tauri::async_runtime::spawn_blocking(move || {
+        broker_post(&format!("connections/{broker_id}/account-selection-link-token"), Value::Object(Default::default()), Some(&connection_secret))
+    }).await.map_err(|error| error.to_string())??;
+    Ok(PlaidAccountUpdateSession {
+        link_token: payload["linkToken"].as_str().ok_or("Plaid broker returned no account-management Link token.")?.to_owned(),
+        connection_id,
+        expiration: payload["expiration"].as_str().unwrap_or_default().to_owned(),
+    })
+}
+
+#[tauri::command]
+async fn complete_plaid_account_update(app: AppHandle, input: CompletePlaidAccountUpdateInput) -> Result<PlaidSyncResult, String> {
+    if input.selected_account_ids.is_empty() {
+        return Err("Keep at least one account selected, or disconnect the institution instead.".into());
+    }
+    let selected_fingerprint = selected_account_fingerprint(&input.selected_account_ids);
+    let (broker_connection_id, connection_secret) = {
+        let (connection, _) = open_database(&app)?;
+        connection.query_row(
+            "SELECT broker_connection_id, connection_secret FROM plaid_connections WHERE id = ?1 AND environment = ?2",
+            (&input.connection_id, PLAID_ENVIRONMENT),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).optional().map_err(|error| error.to_string())?
+    }.ok_or("Connected institution is no longer available.")?;
+
+    // Link's success metadata is the user's authoritative account selection.
+    // Save it before syncing so a stale provider snapshot cannot re-import a
+    // deselected account, then remove all local records belonging to it.
+    {
+        let (mut connection, _) = open_database(&app)?;
+        connection.execute(
+            "UPDATE plaid_connections SET selected_account_fingerprint = ?1 WHERE id = ?2",
+            (selected_fingerprint.as_deref(), &input.connection_id),
+        ).map_err(|error| error.to_string())?;
+        retain_selected_plaid_accounts(&mut connection, &input.connection_id, &input.selected_account_ids)?;
+    }
+
+    let broker_id = broker_connection_id;
+    let payload = tauri::async_runtime::spawn_blocking(move || {
+        broker_post(&format!("connections/{broker_id}/sync"), Value::Object(Default::default()), Some(&connection_secret))
+    }).await.map_err(|error| error.to_string())??;
+    let changed = apply_plaid_sync(&app, &input.connection_id, &payload)?;
+    Ok(plaid_sync_result(changed, &[payload]))
 }
 
 #[tauri::command]
@@ -1964,6 +2293,38 @@ async fn disconnect_plaid_connection(app: AppHandle, connection_id: String) -> R
     refresh_recovery_registry(&connection, true)
 }
 
+fn retain_selected_plaid_accounts(connection: &mut Connection, connection_id: &str, selected_external_ids: &[String]) -> Result<(), String> {
+    let selected: std::collections::HashSet<&str> = selected_external_ids.iter().map(String::as_str).collect();
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
+    let removed_accounts = {
+        let mut statement = transaction.prepare(
+            "SELECT external_account_id, account_id FROM plaid_account_links WHERE plaid_connection_id = ?1"
+        ).map_err(|error| error.to_string())?;
+        let rows = statement.query_map([connection_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        rows
+            .into_iter()
+            .filter(|(external_id, _)| !selected.contains(external_id.as_str()))
+            .collect::<Vec<_>>()
+    };
+    for (external_id, account_id) in &removed_accounts {
+        transaction.execute("DELETE FROM scheduled_transactions WHERE account_id = ?1", [account_id]).map_err(|error| error.to_string())?;
+        transaction.execute("DELETE FROM transactions WHERE account_id = ?1", [account_id]).map_err(|error| error.to_string())?;
+        transaction.execute(
+            "DELETE FROM plaid_account_links WHERE plaid_connection_id = ?1 AND external_account_id = ?2",
+            (connection_id, external_id),
+        ).map_err(|error| error.to_string())?;
+        transaction.execute(
+            "DELETE FROM accounts WHERE id = ?1 AND NOT EXISTS(SELECT 1 FROM plaid_account_links WHERE account_id = ?1)",
+            [account_id],
+        ).map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn remove_plaid_connection_local(connection: &mut Connection, connection_id: &str) -> Result<(), String> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     let account_ids = {
@@ -2017,7 +2378,13 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
         let external_id = item["transaction_id"].as_str().ok_or("Sandbox transaction has no id.")?;
         let Some(account_id) = item["account_id"].as_str().and_then(|value| account_ids.get(value)) else { continue; };
         let amount = item["amount"].as_f64().ok_or("Sandbox amount is invalid.")?;
-        let rows = connection.execute("INSERT OR IGNORE INTO transactions(id, account_id, transaction_date, description, amount_cents, source, external_transaction_id) VALUES(?1, ?2, ?3, ?4, ?5, 'plaid-sandbox', ?6)", (new_id(), account_id, item["date"].as_str().unwrap_or("1970-01-01"), item["name"].as_str().unwrap_or("Plaid transaction"), (-amount * 100.0).round() as i64, external_id)).map_err(|error| error.to_string())?;
+        let description = item["name"].as_str().unwrap_or("Plaid transaction");
+        let pending = item["pending"].as_bool().unwrap_or(false);
+        let merchant_key = normalized_merchant_key(item["merchant_name"].as_str().unwrap_or(description));
+        let category_id: Option<String> = connection.query_row(
+            "SELECT category_id FROM categorization_rules WHERE merchant_key = ?1", [&merchant_key], |row| row.get(0)
+        ).optional().map_err(|error| error.to_string())?;
+        let rows = connection.execute("INSERT OR IGNORE INTO transactions(id, account_id, transaction_date, description, amount_cents, category_id, source, external_transaction_id, merchant_key, pending) VALUES(?1, ?2, ?3, ?4, ?5, ?6, 'plaid-sandbox', ?7, ?8, ?9)", (new_id(), account_id, item["date"].as_str().unwrap_or("1970-01-01"), description, (-amount * 100.0).round() as i64, category_id, external_id, merchant_key, pending)).map_err(|error| error.to_string())?;
         imported += rows;
     }
     Ok(imported)
@@ -2027,7 +2394,8 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(TradeStationOAuthState::default())
-        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, finance_capabilities_list, finance_transactions_search, finance_schedules_search, finance_recurring_detect, finance_proposals_create_schedule, finance_proposals_get, finance_proposals_reject, finance_proposals_confirm_native, finance_proposals_execute_confirmed, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_link_session, complete_plaid_link, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection, save_tradestation_sim_setup_key, tradestation_sim_connection_status, start_tradestation_sim_connection])
+        .setup(create_main_window)
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, account_balance_history, create_account, create_transaction, update_transaction, categorization_match, delete_transaction, ledger_data, finance_capabilities_list, finance_transactions_search, finance_schedules_search, finance_recurring_detect, finance_proposals_create_schedule, finance_proposals_get, finance_proposals_reject, finance_proposals_confirm_native, finance_proposals_execute_confirmed, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_link_session, complete_plaid_link, create_plaid_account_update_session, complete_plaid_account_update, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection, save_tradestation_sim_setup_key, tradestation_sim_connection_status, start_tradestation_sim_connection])
         .build(tauri::generate_context!())
         .expect("error while building Money Map Dev");
 
@@ -2046,6 +2414,32 @@ mod plaid_sync_tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn merchant_normalization_ignores_rotating_reference_numbers() {
+        assert_eq!(normalized_merchant_key("Uber 063015 SF**POOL**"), "UBER");
+        assert_eq!(normalized_merchant_key("Uber 072515 SF**POOL**"), "UBER");
+        assert_ne!(normalized_merchant_key("ACH Electronic CreditGUSTO PAY 123456"), "ACH");
+    }
+
+    #[test]
+    fn balance_history_keeps_manual_history_but_excludes_future_activity() {
+        let points = build_balance_history_points(
+            10_000,
+            "2026-08-17",
+            1,
+            vec![
+                ("2026-09-01".to_string(), -5_000),
+                ("2026-08-17".to_string(), -1_000),
+                ("2026-08-10".to_string(), 2_500),
+            ],
+        );
+
+        let dates = points.iter().map(|point| point.date.as_str()).collect::<Vec<_>>();
+        assert_eq!(dates, vec!["2026-08-10", "2026-08-17"]);
+        assert_eq!(points[0].balance_cents, 11_000);
+        assert_eq!(points[1].balance_cents, 10_000);
+    }
+
     fn test_database() -> Connection {
         test_database_from(Connection::open_in_memory().unwrap())
     }
@@ -2057,10 +2451,12 @@ mod plaid_sync_tests {
                id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
                opening_balance_cents INTEGER NOT NULL DEFAULT 0, reported_balance_cents INTEGER
              );
+             CREATE TABLE categories (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL UNIQUE);
              CREATE TABLE transactions (
                id TEXT PRIMARY KEY NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id),
                transaction_date TEXT NOT NULL, description TEXT NOT NULL, amount_cents INTEGER NOT NULL,
-               category_id TEXT, notes TEXT, source TEXT NOT NULL DEFAULT 'manual', external_transaction_id TEXT,
+               category_id TEXT REFERENCES categories(id), notes TEXT, source TEXT NOT NULL DEFAULT 'manual', external_transaction_id TEXT,
+               merchant_key TEXT, pending INTEGER NOT NULL DEFAULT 0,
                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                UNIQUE(source, external_transaction_id)
              );
@@ -2081,6 +2477,11 @@ mod plaid_sync_tests {
                plaid_account_type TEXT, plaid_account_subtype TEXT, mask TEXT,
                current_balance_cents INTEGER, available_balance_cents INTEGER, balance_refreshed_at TEXT,
                PRIMARY KEY(plaid_connection_id, external_account_id)
+             );
+             CREATE TABLE categorization_rules (
+               id TEXT PRIMARY KEY NOT NULL, merchant_key TEXT NOT NULL UNIQUE,
+               category_id TEXT NOT NULL REFERENCES categories(id),
+               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );"
         ).unwrap();
         connection
@@ -2128,7 +2529,14 @@ mod plaid_sync_tests {
 
     #[test]
     fn clean_dev_exit_removes_database_and_sqlite_sidecars() {
-        let path = std::env::temp_dir().join(format!("money-map-dev-cleanup-{}.db", new_id()));
+        let temp_dir = std::env::temp_dir();
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        // Database IDs are Base64 and may contain path separators. Keep the
+        // filesystem fixture name path-safe so the cleanup test exercises the
+        // database and sidecar removal behavior instead of random directory
+        // creation failures.
+        let path_safe_id = new_id().replace(['/', '\\'], "-");
+        let path = temp_dir.join(format!("money-map-dev-cleanup-{path_safe_id}.db"));
         std::fs::write(&path, b"database").unwrap();
         std::fs::write(format!("{}-wal", path.display()), b"wal").unwrap();
         std::fs::write(format!("{}-shm", path.display()), b"shm").unwrap();
@@ -2198,6 +2606,26 @@ mod plaid_sync_tests {
     }
 
     #[test]
+    fn saved_category_rule_applies_to_future_matching_imports() {
+        let mut connection = test_database();
+        add_connection(&connection, "link-a", "broker-a");
+        connection.execute("INSERT INTO categories(id, name) VALUES('transportation', 'Transportation')", []).unwrap();
+        connection.execute(
+            "INSERT INTO categorization_rules(id, merchant_key, category_id) VALUES('uber-rule', 'UBER', 'transportation')",
+            [],
+        ).unwrap();
+        let mut payload = fixture("Tartan Bank");
+        payload["added"][1]["name"] = json!("Uber 072515 SF**POOL**");
+
+        apply_plaid_sync_connection(&mut connection, "link-a", &payload).unwrap();
+
+        let category: Option<String> = connection.query_row(
+            "SELECT category_id FROM transactions WHERE external_transaction_id = 'txn-spend'", [], |row| row.get(0)
+        ).unwrap();
+        assert_eq!(category.as_deref(), Some("transportation"));
+    }
+
+    #[test]
     fn removed_and_unselected_transactions_do_not_survive_sync() {
         let mut connection = test_database();
         add_connection(&connection, "link-a", "broker-a");
@@ -2216,6 +2644,48 @@ mod plaid_sync_tests {
         assert_eq!(count(&connection, "transactions"), 1);
         let unknown: i64 = connection.query_row("SELECT COUNT(*) FROM transactions WHERE external_transaction_id = 'unknown-account'", [], |row| row.get(0)).unwrap();
         assert_eq!(unknown, 0);
+    }
+
+    #[test]
+    fn selected_account_boundary_blocks_deselected_accounts_from_reappearing() {
+        let mut connection = test_database();
+        add_identified_connection(&connection, "link-a", "broker-a", "ins_tartan", &["checking"]);
+
+        apply_plaid_sync_connection(&mut connection, "link-a", &fixture("Tartan Bank")).unwrap();
+
+        assert_eq!(count(&connection, "accounts"), 1);
+        assert_eq!(count(&connection, "plaid_account_links"), 1);
+        assert_eq!(count(&connection, "transactions"), 1);
+        let linked_external_id: String = connection.query_row(
+            "SELECT external_account_id FROM plaid_account_links WHERE plaid_connection_id = 'link-a'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(linked_external_id, "checking");
+    }
+
+    #[test]
+    fn account_selection_update_deletes_only_deselected_account_data() {
+        let mut connection = test_database();
+        add_connection(&connection, "link-a", "broker-a");
+        apply_plaid_sync_connection(&mut connection, "link-a", &fixture("Tartan Bank")).unwrap();
+        let card_account: String = connection.query_row(
+            "SELECT account_id FROM plaid_account_links WHERE plaid_connection_id = 'link-a' AND external_account_id = 'card'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO scheduled_transactions(id, account_id, start_date, description, amount_cents, recurrence) VALUES('card-schedule', ?1, '2026-08-01', 'Card bill', -100, 'monthly')",
+            [&card_account],
+        ).unwrap();
+
+        retain_selected_plaid_accounts(&mut connection, "link-a", &["checking".to_owned()]).unwrap();
+
+        assert_eq!(count(&connection, "plaid_connections"), 1);
+        assert_eq!(count(&connection, "accounts"), 1);
+        assert_eq!(count(&connection, "plaid_account_links"), 1);
+        assert_eq!(count(&connection, "transactions"), 1);
+        assert_eq!(count(&connection, "scheduled_transactions"), 0);
     }
 
     #[test]
@@ -2345,12 +2815,42 @@ mod plaid_sync_tests {
         drop(connection);
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn read_only_profile_open_refuses_to_create_a_missing_database() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("money-map-read-only-missing-{nonce}.db"));
+
+        let result = open_database_file_read_only(&path, "test-key");
+
+        assert!(result.is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn read_only_profile_open_can_query_but_cannot_mutate() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!("money-map-read-only-existing-{nonce}.db"));
+        {
+            let connection = Connection::open(&path).unwrap();
+            connection.pragma_update(None, "key", "test-key").unwrap();
+            connection.execute_batch("CREATE TABLE evidence(id TEXT PRIMARY KEY); INSERT INTO evidence VALUES('record-a');").unwrap();
+        }
+
+        let connection = open_database_file_read_only(&path, "test-key").unwrap();
+        let count: i64 = connection.query_row("SELECT COUNT(*) FROM evidence", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+        assert!(connection.execute("INSERT INTO evidence VALUES('record-b')", []).is_err());
+        drop(connection);
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[cfg(not(feature = "sandbox-dev"))]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, finance_capabilities_list, finance_transactions_search, finance_schedules_search, finance_recurring_detect, finance_proposals_create_schedule, finance_proposals_get, finance_proposals_reject, finance_proposals_confirm_native, finance_proposals_execute_confirmed, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, create_plaid_link_session, complete_plaid_link, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection])
+        .setup(create_main_window)
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, account_balance_history, create_account, create_transaction, update_transaction, categorization_match, delete_transaction, ledger_data, finance_capabilities_list, finance_transactions_search, finance_schedules_search, finance_recurring_detect, finance_proposals_create_schedule, finance_proposals_get, finance_proposals_reject, finance_proposals_confirm_native, finance_proposals_execute_confirmed, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, create_plaid_link_session, complete_plaid_link, create_plaid_account_update_session, complete_plaid_account_update, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection])
         .run(tauri::generate_context!())
         .expect("error while running Money Map");
 }

@@ -5,6 +5,7 @@
   "app": {
     "windows": [
       {
+        "create": false,
         "title": "Money Map Dev - Sandbox",
         "width": 1440,
         "height": 920,

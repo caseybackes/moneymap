@@ -5,6 +5,8 @@ apps/desktop/node_modules/
 apps/desktop/dist/
 apps/desktop/src-tauri/target/
 **/.wrangler/
+services/plaid-broker/dist-production/
+services/plaid-broker/wrangler.production.jsonc
 **/bin/
 **/obj/
 *.user

@@ -73,10 +73,22 @@ Money Map is an installed, local-first desktop application for one person to mod
 - Financial data is stored locally in an encrypted SQLCipher database.
 - Sandbox Plaid Link is permitted for development. It uses an owner-controlled Plaid dashboard account, encrypted broker-side token handling, and encrypted local connection metadata. Real-bank connection remains gated on Sandbox verification, review-before-import, consent, and disconnect behavior.
 - Development and production are separate build/deployment environments. Development is Sandbox-only; production cannot contain Sandbox credentials, routes, or reset tools. They use separate Worker deployments and local application data identities.
+- Production refuses to start when its compiled environment and broker route do not agree. The broker likewise refuses financial routes unless `APP_ENVIRONMENT` is explicitly `sandbox` or `production`.
 - Disconnecting an institution removes the linked access token and all imported account/transaction records associated with that institution from the local database. Reconnection imports a fresh current data set.
+- Users can revise the accounts shared by an existing connected institution without creating a second provider connection. Before opening the provider flow, Money Map explains that finishing the selection deletes deselected accounts and their locally stored transactions, schedules, and balance history. The app treats the confirmed selection as authoritative, performs that deletion automatically, and confirms completion in its own UI. A later or stale sync must not recreate a deselected account. Transfers visible in a retained account remain part of that retained account's ledger.
 - The implementation stack is React, Tauri/Rust, SQLCipher, and optional purpose-specific Cloudflare Workers for external connection credential boundaries. Plaid covers supported bank aggregation; TradeStation is a direct, read-only brokerage connector.
 - The Investment view is the portfolio home for brokerage and retirement account context. Its first direct connector is TradeStation, limited to `ReadAccount` and `MarketData` OAuth scopes; it has no order-placement capability. Principal and other supported retirement providers remain candidates for Plaid Investments after production coverage is verified.
 - Money is persisted as integer cents.
+
+### Production recovery and local backup
+
+- The encrypted local SQLCipher database remains the canonical financial record. Money Map does not copy balances, transactions, schedules, categories, or analysis data to a cloud backup.
+- Production keeps a minimal recovery registry in Windows Credential Manager containing only the broker connection identifier, connection secret, institution label, and environment. Development and production use different credential identities.
+- At startup, Production compares each recovery-registry connection with the exact connection stored in the readable local database. A missing database, unreadable database, or partial mismatch enters recovery mode before normal loading or creation of another financial connection.
+- Recovery mode permits either restoring the newest encrypted local profile backup or explicitly revoking only the remote connections missing from the readable local profile. If the database is missing or unreadable, explicit revocation removes all surviving remote connections before a fresh profile can be created.
+- Reset is blocked while an unreconciled remote connection exists. A failed broker revocation preserves its recovery handle and continues blocking replacement connection creation.
+- Users can create a timestamped encrypted profile backup under `Documents\\Money Map Backups`. Backup creation checkpoints the database before copying it. Restore validates the backup with the existing database key, preserves the replaced database as an archive, and rejects a backup that cannot be decrypted.
+- A profile backup is recoverable only on the same Windows profile while its database key remains in Windows Credential Manager. Cross-device and post-credential-loss recovery require a later user-controlled key export design.
 
 ## Explicitly out of scope for the current foundation
 
@@ -89,4 +101,4 @@ Money Map is an installed, local-first desktop application for one person to mod
 1. Dashboard information hierarchy and interactions beyond being the landing view.
 2. Category hierarchy beyond the initial flat preferred-category list.
 3. Scenario overlays for calendar, ledger, and scheduled transactions; later AI analysis of a completed numerical scenario.
-4. Backup/restore experience and LLM data-sharing/privacy controls.
+4. LLM data-sharing and privacy controls.

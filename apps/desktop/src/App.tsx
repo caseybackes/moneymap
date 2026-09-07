@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { CalendarDays, ChartNoAxesCombined, Check, ChevronRight, CircleUserRound, Ellipsis, LayoutDashboard, Link2, LoaderCircle, Pencil, Plus, ReceiptText, RefreshCw, Repeat2, SkipForward, Sparkles, Trash2, Unplug, WalletCards, X } from "lucide-react";
+import { CalendarDays, CalendarPlus, ChartNoAxesCombined, Check, ChevronRight, CircleUserRound, Ellipsis, LayoutDashboard, Link2, ListChecks, LoaderCircle, Pencil, Plus, ReceiptText, RefreshCw, Repeat2, SkipForward, Sparkles, Trash2, Unplug, WalletCards, X } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePlaidLink } from "react-plaid-link";
 import moneyMapIcon from "../src-tauri/icons/money-map-plaid-1024.png";
@@ -11,8 +11,13 @@ type Account = { id: string; name: string; accountType: string; balanceCents: nu
 type LedgerEntry = { id: string; accountId: string; transactionDate: string; description: string; accountName: string; categoryName: string; categoryId: string | null; amountCents: number };
 type DashboardData = { incomeCents: number; spendingCents: number; accounts: Account[]; recentTransactions: LedgerEntry[] };
 type LedgerData = { transactions: LedgerEntry[] };
+type CategorizationMatch = { merchantKey: string; matchingTransactions: number };
+type BalanceHistoryPoint = { date: string; balanceCents: number };
+type AccountBalanceHistory = { points: BalanceHistoryPoint[]; asOf: string; estimated: boolean };
 type Schedule = { id: string; accountId: string; startDate: string; endDate: string | null; nextOccurrence: string; description: string; amountCents: number; recurrence: string; accountName: string };
+type ScheduleSeed = Pick<LedgerEntry, "accountId" | "transactionDate" | "description" | "amountCents">;
 type SandboxLinkSession = { linkToken: string; sessionId: string; sessionSecret: string; expiration: string };
+type PlaidAccountUpdateSession = { linkToken: string; connectionId: string; expiration: string };
 type Category = { id: string; name: string };
 type CalendarItem = { id: string; description: string; amountCents: number; scheduled?: boolean };
 type ConnectedInstitution = { id: string; institutionName: string; environment: string; accountCount: number };
@@ -29,8 +34,9 @@ const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD
 const formatMoney = (cents: number) => money.format(cents / 100);
 const formatMaskedAccountIdentifier = (mask?: string | null) => mask?.trim() ? `****${mask.trim()}` : null;
 const wait = (milliseconds: number) => new Promise(resolve => window.setTimeout(resolve, milliseconds));
+const plaidHistorySyncMaxAttempts = 60;
 
-async function synchronizePlaidHistory(onProgress: (attempt: number) => void, maxAttempts = 20): Promise<PlaidSyncResult> {
+async function synchronizePlaidHistory(onProgress: (attempt: number, maxAttempts: number) => void, maxAttempts = plaidHistorySyncMaxAttempts): Promise<PlaidSyncResult> {
   let aggregate: PlaidSyncResult = { changed: 0, pendingConnections: 0, statuses: [] };
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const result = await invoke<PlaidSyncResult>("sync_plaid_connections");
@@ -40,7 +46,7 @@ async function synchronizePlaidHistory(onProgress: (attempt: number) => void, ma
       statuses: result.statuses,
     };
     if (result.pendingConnections === 0) return aggregate;
-    onProgress(attempt);
+    onProgress(attempt, maxAttempts);
     if (attempt < maxAttempts) await wait(3_000);
   }
   return aggregate;
@@ -51,12 +57,26 @@ function Widget({ title, children, className = "", action }: { title: string; ch
 }
 
 function IconAction({ label, tone = "default", className = "", children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; tone?: "default" | "danger"; children: React.ReactNode }) {
-  return <button {...props} className={`icon-action ${tone === "danger" ? "danger" : ""} ${className}`.trim()} aria-label={label} title={label}>{children}</button>;
+  return <button {...props} className={`icon-action ${tone === "danger" ? "danger" : ""} ${className}`.trim()} aria-label={label}>{children}</button>;
 }
 
 function OverflowActions({ label = "More actions", children }: { label?: string; children: React.ReactNode }) {
   const details = useRef<HTMLDetailsElement>(null);
-  return <details className="overflow-actions" ref={details}><summary aria-label={label} title={label}><Ellipsis aria-hidden="true" /></summary><div className="overflow-menu" role="menu" onClick={() => details.current?.removeAttribute("open")}>{children}</div></details>;
+  useEffect(() => {
+    function dismiss(event: PointerEvent) {
+      if (details.current?.open && !details.current.contains(event.target as Node)) details.current.removeAttribute("open");
+    }
+    function dismissWithKeyboard(event: KeyboardEvent) {
+      if (event.key === "Escape") details.current?.removeAttribute("open");
+    }
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", dismissWithKeyboard);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", dismissWithKeyboard);
+    };
+  }, []);
+  return <details className="overflow-actions" ref={details}><summary aria-label={label}><Ellipsis aria-hidden="true" /></summary><div className="overflow-menu" role="menu" onClick={() => details.current?.removeAttribute("open")}>{children}</div></details>;
 }
 
 function NetWorthChart({ netWorth, transactions }: { netWorth: number; transactions: LedgerEntry[] }) {
@@ -99,7 +119,9 @@ export function App() {
   const [calendarMonth, setCalendarMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
+  const [scheduleSeed, setScheduleSeed] = useState<ScheduleSeed | null>(null);
   const [editingTransaction, setEditingTransaction] = useState<LedgerEntry | null>(null);
+  const [transactionInitialDate, setTransactionInitialDate] = useState<string | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [syncingAccounts, setSyncingAccounts] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
@@ -142,8 +164,8 @@ export function App() {
         if (initialConnections.length === 0) { setStartupSyncMessage("Local profile ready."); return; }
         setStartupSyncMessage(`Refreshing ${initialConnections.length} connected ${initialConnections.length === 1 ? "institution" : "institutions"}…`);
         try {
-          const syncResult = await synchronizePlaidHistory(attempt => {
-            if (!cancelled) setStartupSyncMessage(`Plaid is preparing transaction history… retry ${attempt} of 20`);
+          const syncResult = await synchronizePlaidHistory((attempt, maxAttempts) => {
+            if (!cancelled) setStartupSyncMessage(`Preparing transaction history… retry ${attempt} of ${maxAttempts}`);
           });
           const [refreshedDashboard, refreshedConnections, refreshedSchedules] = await Promise.all([
             invoke<DashboardData>("dashboard_data"), invoke<ConnectedInstitution[]>("plaid_connections_data"), invoke<Schedule[]>("scheduled_data")
@@ -171,7 +193,8 @@ export function App() {
   const periodIncome = periodTransactions.filter(item => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0);
   const periodSpending = -periodTransactions.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0);
   const periodLabel = rangeMonths === null ? "All activity" : rangeMonths === 1 ? "Last month" : rangeMonths === 12 ? "Last year" : `Last ${rangeMonths} months`;
-  async function syncConnectedAccounts() { setSyncingAccounts(true); setError(null); setSyncMessage("Refreshing connected accounts…"); try { const result = await synchronizePlaidHistory(attempt => setSyncMessage(`Plaid is preparing transaction history… retry ${attempt} of 20`)); setSyncMessage(result.pendingConnections > 0 ? "Plaid is still preparing transaction history. Retry later or restart Money Map." : result.changed === 0 ? "Up to date." : `Synced ${result.changed} transaction change${result.changed === 1 ? "" : "s"}.`); refresh(); if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
+  function openTransaction(initialDate: string | null = null) { setEditingTransaction(null); setTransactionInitialDate(initialDate); setDialog("transaction"); }
+  async function syncConnectedAccounts() { setSyncingAccounts(true); setError(null); setSyncMessage("Refreshing connected accounts…"); try { const result = await synchronizePlaidHistory((attempt, maxAttempts) => setSyncMessage(`Preparing transaction history… retry ${attempt} of ${maxAttempts}`)); setSyncMessage(result.pendingConnections > 0 ? "Transaction history is still being prepared. Retry later or restart Money Map." : result.changed === 0 ? "Up to date." : `Synced ${result.changed} transaction change${result.changed === 1 ? "" : "s"}.`); refresh(); if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
   async function disconnectConnectedAccount(connection: ConnectedInstitution) { setPendingDisconnect({ connection, confirming: false }); }
   async function confirmDisconnect() {
     const pending = pendingDisconnect;
@@ -235,7 +258,7 @@ export function App() {
       </div>
     </aside>
     <section className="page">
-      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" || view === "scenarios" ? "PLANNING" : view === "investments" ? "PORTFOLIO" : view === "settings" ? "PROFILE" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : view === "investments" ? "Investments" : view === "scenarios" ? "Scenario modeling" : view === "settings" ? "Settings" : "Ledger"}</h1></div>{view !== "scenarios" && view !== "accounts" && view !== "investments" && view !== "settings" ? <button className="primary-action" onClick={() => setDialog(view === "scheduled" ? "schedule" : "transaction")}>{view === "scheduled" ? "Add schedule" : "Add transaction"}</button> : null}</header>
+      <header className="page-header"><div><p className="eyebrow">{view === "dashboard" ? "OVERVIEW" : view === "calendar" || view === "scheduled" || view === "scenarios" ? "PLANNING" : view === "investments" ? "PORTFOLIO" : view === "settings" ? "PROFILE" : "RECORDS"}</p><h1>{view === "dashboard" ? "Dashboard" : view === "calendar" ? "Calendar" : view === "scheduled" ? "Scheduled transactions" : view === "accounts" ? "Accounts & cards" : view === "investments" ? "Investments" : view === "scenarios" ? "Scenario modeling" : view === "settings" ? "Settings" : "Ledger"}</h1></div>{view !== "scenarios" && view !== "accounts" && view !== "investments" && view !== "settings" ? <button className="primary-action" onClick={() => view === "scheduled" ? setDialog("schedule") : openTransaction()}>{view === "scheduled" ? "Add schedule" : "Add transaction"}</button> : null}</header>
       {startupSyncing ? <div className="startup-sync" role="status" aria-live="polite"><span className="sync-spinner" /><span><strong>{startupSyncMessage}</strong><small>Your dashboard remains available while the refresh runs.</small></span></div> : null}
       {!startupSyncing && startupSyncWarning ? <div className="startup-sync warning"><span>!</span><span><strong>Account refresh did not finish.</strong><small>{startupSyncWarning}</small></span></div> : null}
       {recoveryStatus?.recoveryRequired ? <section className="recovery-panel" role="alert"><div><p className="eyebrow">PROFILE RECOVERY</p><h2>{recoveryStatus.authorityUnknown ? "Connection authority cannot be verified" : "Remote connections need your decision"}</h2><p>{recoveryStatus.message}</p><small>{recoveryStatus.authorityUnknown ? "Money Map will not create or reset a Production profile while remote authority is unknown." : `${recoveryStatus.orphanedConnections} recorded remote ${recoveryStatus.orphanedConnections === 1 ? "connection" : "connections"}. Money Map has blocked a new bank connection so the existing paid connection cannot be duplicated.`}</small></div><div className="recovery-actions">{recoveryStatus.backupAvailable ? <button className="primary-action" disabled={recoveringStore} onClick={() => void restoreLocalProfile()}>{recoveringStore ? "Restoring…" : "Restore latest encrypted backup"}</button> : null}{!recoveryStatus.authorityUnknown ? <button className="destructive-action" disabled={recoveringStore} onClick={() => void revokeAndStartFresh()}>{recoveringStore ? "Working…" : recoveryStatus.databaseExists && recoveryStatus.databaseReadable ? "Revoke missing connections" : "Revoke old connections and start fresh"}</button> : null}</div><p className="recovery-note">Backups are SQLCipher-encrypted and can be restored only by the same Windows profile that created them.</p></section> : null}
@@ -267,16 +290,16 @@ export function App() {
         {schedules.length > 0 ? <Widget title="Upcoming" className="upcoming-widget" action={<button className="widget-link" onClick={() => setView("scheduled")}>View all <ChevronRight aria-hidden="true" /></button>}><div className="upcoming-list">{[...schedules].sort((left, right) => left.nextOccurrence.localeCompare(right.nextOccurrence)).slice(0, 4).map(item => <div className="upcoming-row" key={item.id}><div><strong>{item.description}</strong><small>{item.nextOccurrence} - {item.accountName} - {item.recurrence}</small></div><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div></Widget> : null}
         <RecurringReview onExecuted={() => { refresh(); void invoke<Schedule[]>("scheduled_data").then(setSchedules); if (ledger) void invoke<LedgerData>("ledger_data").then(setLedger); }} />
       </div> : null}
-      {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onEdit={(entry) => { setEditingTransaction(entry); setDialog("transaction"); }} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
-      {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} schedules={schedules} onMonthChange={setCalendarMonth} /> : null}
+      {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onEdit={(entry) => { setTransactionInitialDate(null); setEditingTransaction(entry); setDialog("transaction"); }} onSchedule={(entry) => { setEditingSchedule(null); setScheduleSeed(entry); setDialog("schedule"); }} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
+      {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} schedules={schedules} onMonthChange={setCalendarMonth} onAddTransaction={date => openTransaction(date)} /> : null}
       {view === "scheduled" ? <Scheduled schedules={schedules} onEdit={(schedule) => { setEditingSchedule(schedule); setDialog("schedule"); }} onChanged={() => { refresh(); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
-      {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} connections={connections} sandboxEnabled={sandboxEnabled} syncMessage={syncMessage} selectedAccountId={selectedAccountId} onSelectAccount={setSelectedAccountId} onAdd={() => setDialog("account")} onSync={() => void syncConnectedAccounts()} onDisconnect={(connection) => void disconnectConnectedAccount(connection)} syncing={syncingAccounts} /> : null}
+      {view === "accounts" ? <Accounts accounts={dashboard?.accounts ?? []} connections={connections} sandboxEnabled={sandboxEnabled} syncMessage={syncMessage} selectedAccountId={selectedAccountId} onSelectAccount={setSelectedAccountId} onAdd={() => setDialog("account")} onSync={() => void syncConnectedAccounts()} onDisconnect={(connection) => void disconnectConnectedAccount(connection)} onManaged={() => { refresh(); void invoke<ConnectedInstitution[]>("plaid_connections_data").then(setConnections); void invoke<LedgerData>("ledger_data").then(setLedger); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} syncing={syncingAccounts} /> : null}
       {view === "investments" ? <InvestmentView sandboxEnabled={sandboxEnabled} onOpenSettings={() => setView("settings")} /> : null}
       {view === "scenarios" ? <ScenarioModel netWorth={netWorth} incomeCents={dashboard?.incomeCents ?? 0} spendingCents={dashboard?.spendingCents ?? 0} /> : null}
       {view === "settings" ? <SettingsView sandboxEnabled={sandboxEnabled} onOpenInvestments={() => setView("investments")} categories={categories} onCategoryCreated={() => void invoke<Category[]>("categories_data").then(setCategories)} /> : null}
       {dialog === "account" ? <AccountDialog onClose={() => setDialog(null)} onSaved={() => { setDialog(null); refresh(); }} /> : null}
-      {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} categories={categories} entry={editingTransaction} onClose={() => { setDialog(null); setEditingTransaction(null); }} onSaved={() => { setDialog(null); setEditingTransaction(null); refresh(); if (view === "ledger") void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
-      {dialog === "schedule" ? <ScheduleDialog accounts={dashboard?.accounts ?? []} schedule={editingSchedule} onClose={() => { setDialog(null); setEditingSchedule(null); }} onSaved={() => { setDialog(null); setEditingSchedule(null); setView("scheduled"); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
+      {dialog === "transaction" ? <TransactionDialog accounts={dashboard?.accounts ?? []} categories={categories} entry={editingTransaction} initialDate={transactionInitialDate} onClose={() => { setDialog(null); setEditingTransaction(null); setTransactionInitialDate(null); }} onSaved={() => { setDialog(null); setEditingTransaction(null); setTransactionInitialDate(null); refresh(); if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger); if (view === "calendar") void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
+      {dialog === "schedule" ? <ScheduleDialog accounts={dashboard?.accounts ?? []} schedule={editingSchedule} seed={scheduleSeed} onClose={() => { setDialog(null); setEditingSchedule(null); setScheduleSeed(null); }} onSaved={() => { setDialog(null); setEditingSchedule(null); setScheduleSeed(null); setView("scheduled"); void invoke<Schedule[]>("scheduled_data").then(setSchedules); }} /> : null}
       {pendingDisconnect ? <ConfirmationDialog title={`Disconnect ${pendingDisconnect.connection.institutionName}?`} confirmLabel="Disconnect and delete" busy={pendingDisconnect.confirming} onCancel={() => setPendingDisconnect(null)} onConfirm={() => void confirmDisconnect()}><p>This removes this institution's Plaid connection and deletes every linked account, imported transaction, manual transaction, balance adjustment, and scheduled transaction from this Money Map profile.</p><p>Reconnecting later pulls a fresh copy from Plaid.</p></ConfirmationDialog> : null}
     </section>
   </main>;
@@ -334,11 +357,11 @@ function SettingsView({ sandboxEnabled, onOpenInvestments, categories, onCategor
   </div>;
 }
 
-function ConfirmationDialog({ title, children, confirmLabel, busy, onCancel, onConfirm }: { title: string; children: React.ReactNode; confirmLabel: string; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
-  return <div className="dialog-backdrop" role="presentation"><section className="dialog confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirmation-title"><header><h2 id="confirmation-title">{title}</h2><button aria-label="Cancel" disabled={busy} onClick={onCancel}>×</button></header><div className="confirmation-copy">{children}</div><footer><button disabled={busy} onClick={onCancel}>Cancel</button><button className="primary-action destructive-action" disabled={busy} onClick={onConfirm}>{busy ? "Disconnecting…" : confirmLabel}</button></footer></section></div>;
+function ConfirmationDialog({ title, children, confirmLabel, busy, busyLabel = "Working…", destructive = true, onCancel, onConfirm }: { title: string; children: React.ReactNode; confirmLabel: string; busy: boolean; busyLabel?: string; destructive?: boolean; onCancel: () => void; onConfirm: () => void }) {
+  return <div className="dialog-backdrop" role="presentation"><section className="dialog confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirmation-title"><header><h2 id="confirmation-title">{title}</h2><button aria-label="Cancel" disabled={busy} onClick={onCancel}>×</button></header><div className="confirmation-copy">{children}</div><footer><button disabled={busy} onClick={onCancel}>Cancel</button><button className={`primary-action ${destructive ? "destructive-action" : ""}`} disabled={busy} onClick={onConfirm}>{busy ? busyLabel : confirmLabel}</button></footer></section></div>;
 }
 
-function Ledger({ transactions, onEdit, onDeleted }: { transactions: LedgerEntry[]; onEdit: (entry: LedgerEntry) => void; onDeleted: () => void }) {
+function Ledger({ transactions, onEdit, onSchedule, onDeleted }: { transactions: LedgerEntry[]; onEdit: (entry: LedgerEntry) => void; onSchedule: (entry: LedgerEntry) => void; onDeleted: () => void }) {
   const [query, setQuery] = useState(""); const [category, setCategory] = useState("all"); const [fromDate, setFromDate] = useState(""); const [toDate, setToDate] = useState(""); const [amount, setAmount] = useState(""); const [visible, setVisible] = useState(50);
   const categories = useMemo(() => [...new Set(transactions.map(item => item.categoryName))].sort(), [transactions]);
   const filtered = useMemo(() => transactions.filter(item => {
@@ -351,7 +374,7 @@ function Ledger({ transactions, onEdit, onDeleted }: { transactions: LedgerEntry
   useEffect(() => setVisible(50), [query, category, fromDate, toDate, amount]);
   async function remove(item: LedgerEntry) { if (!confirm(`Delete ${item.description}?`)) return; await invoke("delete_transaction", { transactionId: item.id }); onDeleted(); }
   function clearFilters() { setQuery(""); setCategory("all"); setFromDate(""); setToDate(""); setAmount(""); }
-  return <section className="ledger-widget"><div className="ledger-toolbar ledger-filters"><input aria-label="Search transactions" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search description or account" /><select aria-label="Filter by category" value={category} onChange={event => setCategory(event.target.value)}><option value="all">All categories</option>{categories.map(name => <option key={name} value={name}>{name}</option>)}</select><label>From<input type="date" value={fromDate} onChange={event => setFromDate(event.target.value)} /></label><label>To<input type="date" value={toDate} onChange={event => setToDate(event.target.value)} /></label><label>Min. amount<input type="number" min="0" step="0.01" value={amount} onChange={event => setAmount(event.target.value)} placeholder="$0.00" /></label><IconAction label="Clear filters" onClick={clearFilters}><X aria-hidden="true" /></IconAction><span>{filtered.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span><span aria-hidden="true" /></div>{filtered.length === 0 ? <p className="empty-copy">No matching transactions.</p> : filtered.slice(0, visible).map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><span className="ledger-description"><strong>{item.description}</strong><small>{item.categoryName}</small></span><span className="ledger-account">{item.accountName}</span><strong className={`ledger-value ${item.amountCents >= 0 ? "positive" : "negative"}`}>{formatMoney(item.amountCents)}</strong><div className="ledger-actions"><IconAction label={`Edit ${item.description}`} onClick={() => onEdit(item)}><Pencil aria-hidden="true" /></IconAction><OverflowActions label={`More actions for ${item.description}`}><button className="overflow-menu-item danger" role="menuitem" onClick={() => void remove(item)}><Trash2 aria-hidden="true" />Delete transaction</button></OverflowActions></div></div>)}</div>{visible < filtered.length ? <div className="ledger-load"><button className="secondary-action" onClick={() => setVisible(count => count + 50)}>Load 50 more</button><span>{Math.min(visible, filtered.length)} of {filtered.length}</span></div> : null}</section>;
+  return <section className="ledger-widget"><div className="ledger-toolbar ledger-filters"><input aria-label="Search transactions" value={query} onChange={event => setQuery(event.target.value)} placeholder="Search description or account" /><select aria-label="Filter by category" value={category} onChange={event => setCategory(event.target.value)}><option value="all">All categories</option>{categories.map(name => <option key={name} value={name}>{name}</option>)}</select><label>From<input type="date" value={fromDate} onChange={event => setFromDate(event.target.value)} /></label><label>To<input type="date" value={toDate} onChange={event => setToDate(event.target.value)} /></label><label>Min. amount<input type="number" min="0" step="0.01" value={amount} onChange={event => setAmount(event.target.value)} placeholder="$0.00" /></label><IconAction label="Clear filters" onClick={clearFilters}><X aria-hidden="true" /></IconAction><span>{filtered.length} records</span></div><div className="ledger-table"><div className="ledger-head"><span>Date</span><span>Description</span><span>Account</span><span>Amount</span><span aria-hidden="true" /></div>{filtered.length === 0 ? <p className="empty-copy">No matching transactions.</p> : filtered.slice(0, visible).map(item => <div className="ledger-row" key={item.id}><span>{item.transactionDate}</span><span className="ledger-description"><strong>{item.description}</strong><small>{item.categoryName}</small></span><span className="ledger-account">{item.accountName}</span><strong className={`ledger-value ${item.amountCents >= 0 ? "positive" : "negative"}`}>{formatMoney(item.amountCents)}</strong><div className="ledger-actions"><IconAction label={`Edit ${item.description}`} onClick={() => onEdit(item)}><Pencil aria-hidden="true" /></IconAction><OverflowActions label={`More actions for ${item.description}`}><button className="overflow-menu-item" role="menuitem" onClick={() => onSchedule(item)}><CalendarPlus aria-hidden="true" />Add to schedule</button><button className="overflow-menu-item danger" role="menuitem" onClick={() => void remove(item)}><Trash2 aria-hidden="true" />Delete transaction</button></OverflowActions></div></div>)}</div>{visible < filtered.length ? <div className="ledger-load"><button className="secondary-action" onClick={() => setVisible(count => count + 50)}>Load 50 more</button><span>{Math.min(visible, filtered.length)} of {filtered.length}</span></div> : null}</section>;
 }
 
 function Scheduled({ schedules, onEdit, onChanged }: { schedules: Schedule[]; onEdit: (schedule: Schedule) => void; onChanged: () => void }) {
@@ -368,11 +391,71 @@ function Scheduled({ schedules, onEdit, onChanged }: { schedules: Schedule[]; on
   return <section className="ledger-widget scheduled-widget"><div className="ledger-head"><span>Next occurrence</span><span>Description</span><span>Account</span><span>Amount</span><span aria-hidden="true" /></div>{schedules.length === 0 ? <p className="empty-copy">No scheduled transactions yet.</p> : schedules.map(item => <div className="ledger-row" key={item.id}><span>{item.nextOccurrence}<small>{item.recurrence} · starts {item.startDate}{item.endDate ? ` · ends ${item.endDate}` : ""}</small></span><span className="ledger-description"><strong>{item.description}</strong>{status[item.id] ? <small className="schedule-status" role="status">{status[item.id]}</small> : null}</span><span className="ledger-account">{item.accountName}</span><strong className={`ledger-value ${item.amountCents >= 0 ? "positive" : "negative"}`}>{formatMoney(item.amountCents)}</strong><div className="schedule-actions"><IconAction label={`Edit ${item.description}`} disabled={processing !== null} onClick={() => onEdit(item)}><Pencil aria-hidden="true" /></IconAction><IconAction label={`Skip ${item.nextOccurrence}`} disabled={processing !== null} onClick={() => void process(item, "skip")}>{processing === `skip:${item.id}` ? <LoaderCircle className="spin" aria-hidden="true" /> : <SkipForward aria-hidden="true" />}</IconAction><IconAction label={`Record ${item.nextOccurrence}`} disabled={processing !== null} onClick={() => void process(item, "record")}>{processing === `record:${item.id}` ? <LoaderCircle className="spin" aria-hidden="true" /> : <Check aria-hidden="true" />}</IconAction></div></div>)}</section>;
 }
 
-function Accounts({ accounts, connections, sandboxEnabled, syncMessage, selectedAccountId, onSelectAccount, onAdd, onSync, onDisconnect, syncing }: { accounts: Account[]; connections: ConnectedInstitution[]; sandboxEnabled: boolean; syncMessage: string | null; selectedAccountId: string | null; onSelectAccount: (accountId: string | null) => void; onAdd: () => void; onSync: () => void; onDisconnect: (connection: ConnectedInstitution) => void; syncing: boolean }) {
+function AccountBalanceChart({ account }: { account: Account }) {
+  const [history, setHistory] = useState<AccountBalanceHistory | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setHistory(null); setLoadError(null);
+    void invoke<AccountBalanceHistory>("account_balance_history", { accountId: account.id })
+      .then(result => { if (!cancelled) setHistory(result); })
+      .catch(reason => { if (!cancelled) setLoadError(String(reason)); });
+    return () => { cancelled = true; };
+  }, [account.id]);
+
+  if (loadError) return <p className="account-history-status">Balance history unavailable.</p>;
+  if (!history) return <p className="account-history-status">Building balance history…</p>;
+  const points = history.points;
+  const values = points.map(point => point.balanceCents);
+  const minimum = Math.min(...values);
+  const maximum = Math.max(...values);
+  const span = Math.max(maximum - minimum, 1);
+  const timestamps = points.map(point => new Date(`${point.date}T12:00:00`).getTime());
+  const firstTime = Math.min(...timestamps);
+  const timeSpan = Math.max(Math.max(...timestamps) - firstTime, 1);
+  const coordinates = points.map((point, index) => ({ ...point, x: points.length === 1 ? 0 : ((timestamps[index] - firstTime) / timeSpan) * 1000, y: 150 - ((point.balanceCents - minimum) / span) * 112 }));
+  const path = coordinates.length === 1
+    ? `M0 ${coordinates[0].y.toFixed(1)} L1000 ${coordinates[0].y.toFixed(1)}`
+    : coordinates.reduce((segments, point, index) => {
+        if (index === 0) return `M${point.x.toFixed(1)} ${point.y.toFixed(1)}`;
+        // Balances change when activity posts. A stepped trace avoids implying
+        // gradual movement across days with no recorded transactions.
+        return `${segments} H${point.x.toFixed(1)} V${point.y.toFixed(1)}`;
+      }, "");
+  const area = `${path} L1000 170 L0 170 Z`;
+  const asOf = new Date(history.asOf);
+  const asOfLabel = Number.isNaN(asOf.getTime()) ? history.asOf : asOf.toLocaleString();
+  return <div className="account-balance-history">
+    <div className="account-history-heading"><span><small>Estimated balance history</small><strong>Posted transactions</strong></span><span><small>As of</small><strong>{asOfLabel}</strong></span></div>
+    <svg viewBox="0 0 1000 180" preserveAspectRatio="none" role="img" aria-label={`Estimated balance history for ${account.name}`}>
+      <defs><linearGradient id="account-balance-fill" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#5bc9f5" stopOpacity=".25"/><stop offset="1" stopColor="#5bc9f5" stopOpacity="0"/></linearGradient></defs>
+      <path className="account-history-area" d={area}/><path className="account-history-line" d={path}/>
+    </svg>
+    <div className="account-history-axis"><span>{points[0]?.date}</span><span>{formatMoney(minimum)} – {formatMoney(maximum)}</span><span>{points.at(-1)?.date}</span></div>
+    <div className="account-history-meta"><span>{account.plaidConnectionId ? "Plaid connection" : "Local account"}</span><span>{account.accountType}{account.plaidAccountSubtype ? ` · ${account.plaidAccountSubtype}` : ""}</span>{formatMaskedAccountIdentifier(account.mask) ? <span>{formatMaskedAccountIdentifier(account.mask)}</span> : null}</div>
+  </div>;
+}
+
+function Accounts({ accounts, connections, sandboxEnabled, syncMessage, selectedAccountId, onSelectAccount, onAdd, onSync, onDisconnect, onManaged, syncing }: { accounts: Account[]; connections: ConnectedInstitution[]; sandboxEnabled: boolean; syncMessage: string | null; selectedAccountId: string | null; onSelectAccount: (accountId: string | null) => void; onAdd: () => void; onSync: () => void; onDisconnect: (connection: ConnectedInstitution) => void; onManaged: () => void; syncing: boolean }) {
+  const [accountUpdateSession, setAccountUpdateSession] = useState<PlaidAccountUpdateSession | null>(null);
+  const [accountUpdateMessage, setAccountUpdateMessage] = useState<string | null>(null);
+  const [managingConnectionId, setManagingConnectionId] = useState<string | null>(null);
+  const [pendingAccountManagement, setPendingAccountManagement] = useState<ConnectedInstitution | null>(null);
   const linkedAccountIds = new Set(accounts.filter(account => account.plaidConnectionId).map(account => account.id));
   const localAccounts = accounts.filter(account => !linkedAccountIds.has(account.id));
   const connectionIds = new Set(connections.map(connection => connection.id));
   const ungroupedLinkedAccounts = accounts.filter(account => account.plaidConnectionId && !connectionIds.has(account.plaidConnectionId));
+
+  async function manageSyncedAccounts(connection: ConnectedInstitution) {
+    setManagingConnectionId(connection.id);
+    setAccountUpdateMessage("Opening account selection…");
+    try {
+      setAccountUpdateSession(await invoke<PlaidAccountUpdateSession>("create_plaid_account_update_session", { connectionId: connection.id }));
+    } catch (reason) {
+      setAccountUpdateMessage(String(reason));
+      setManagingConnectionId(null);
+    }
+  }
 
   function accountRows(groupAccounts: Account[]) {
     if (groupAccounts.length === 0) return <p className="account-group-empty">No accounts selected for this connection.</p>;
@@ -387,19 +470,14 @@ function Accounts({ accounts, connections, sandboxEnabled, syncMessage, selected
           <span className="account-row-balance"><strong>{formatMoney(account.balanceCents)}</strong>{account.availableBalanceCents !== null && account.availableBalanceCents !== undefined ? <small>{formatMoney(account.availableBalanceCents)} available</small> : null}</span>
           <ChevronRight aria-hidden="true" />
         </button>
-        {expanded ? <section className="compact-account-details" aria-label={`${account.name} details`}>
-          <span><small>Source</small><strong>{account.plaidConnectionId ? "Plaid connection" : "Local account"}</strong></span>
-          <span><small>Account type</small><strong>{account.accountType}{account.plaidAccountSubtype ? ` · ${account.plaidAccountSubtype}` : ""}</strong></span>
-          {mask ? <span><small>Account</small><strong>{mask}</strong></span> : null}
-          <span><small>{account.balanceRefreshedAt ? "Last refreshed" : "Balance basis"}</small><strong>{account.balanceRefreshedAt ? new Date(account.balanceRefreshedAt).toLocaleString() : "Opening balance and ledger activity"}</strong></span>
-        </section> : null}
+        {expanded ? <section className="compact-account-details" aria-label={`${account.name} details`}><AccountBalanceChart account={account} /></section> : null}
       </div>;
     })}</div>;
   }
 
   return <section className="ledger-widget accounts-page compact-accounts-page">
     <div className="accounts-toolbar compact-accounts-toolbar">
-      <span><p className="empty-copy">{sandboxEnabled ? "Sandbox connections and local accounts" : "Connected and local accounts"}</p>{syncMessage ? <small className="sync-message">{syncMessage}</small> : null}</span>
+      <span><p className="empty-copy">{sandboxEnabled ? "Sandbox connections and local accounts" : "Connected and local accounts"}</p>{syncMessage ? <small className="sync-message">{syncMessage}</small> : null}{accountUpdateMessage ? <small className="sync-message" role="status">{accountUpdateMessage}</small> : null}</span>
       <div className="account-page-actions">
         {connections.length > 0 ? <IconAction label="Sync connected accounts" type="button" disabled={syncing} onClick={onSync}><RefreshCw aria-hidden="true" className={syncing ? "spin" : ""} /></IconAction> : null}
         <IconAction label="Add local account" type="button" onClick={onAdd}><Plus aria-hidden="true" /></IconAction>
@@ -411,6 +489,7 @@ function Accounts({ accounts, connections, sandboxEnabled, syncMessage, selected
         <header className="account-group-header">
           <span><strong>{connection.institutionName}</strong><small>{connection.accountCount} linked account{connection.accountCount === 1 ? "" : "s"}{sandboxEnabled ? " · Sandbox" : ""}</small></span>
           <OverflowActions label={`More actions for ${connection.institutionName}`}>
+            <button className="overflow-menu-item" disabled={syncing || managingConnectionId !== null} onClick={() => setPendingAccountManagement(connection)}><ListChecks aria-hidden="true" />Manage synced accounts</button>
             <button className="overflow-menu-item danger" disabled={syncing} onClick={() => onDisconnect(connection)}><Unplug aria-hidden="true" />Disconnect institution</button>
           </OverflowActions>
         </header>
@@ -420,6 +499,8 @@ function Accounts({ accounts, connections, sandboxEnabled, syncMessage, selected
       {localAccounts.length > 0 ? <section className="account-group"><header className="account-group-header"><span><strong>Local accounts</strong><small>{localAccounts.length} manually managed account{localAccounts.length === 1 ? "" : "s"}</small></span></header>{accountRows(localAccounts)}</section> : null}
       {accounts.length === 0 ? <div className="empty-account-state"><WalletCards aria-hidden="true" /><strong>No accounts yet</strong><span>Add a local account or connect an institution to begin.</span></div> : null}
     </div>
+    {pendingAccountManagement ? <ConfirmationDialog title={`Change accounts synced from ${pendingAccountManagement.institutionName}?`} confirmLabel="Review account selection" busy={false} destructive={false} onCancel={() => setPendingAccountManagement(null)} onConfirm={() => { const connection = pendingAccountManagement; setPendingAccountManagement(null); void manageSyncedAccounts(connection); }}><p>Finishing the account selection removes every deselected account and its locally stored transactions, schedules, and balance history from this Money Map profile.</p><p>Nothing is deleted at your bank. Transfers recorded in accounts you keep remain visible.</p><p>Plaid may show a generic notice saying previously accessed data is not deleted. Money Map performs the local deletion automatically when the selection is finished.</p></ConfirmationDialog> : null}
+    {accountUpdateSession ? <PlaidAccountUpdateLauncher session={accountUpdateSession} onDone={() => { setAccountUpdateSession(null); setManagingConnectionId(null); setAccountUpdateMessage("Account selection updated. Local data for deselected accounts was deleted from this device."); onManaged(); }} onCancelled={() => { setAccountUpdateSession(null); setManagingConnectionId(null); setAccountUpdateMessage(null); }} onStatus={setAccountUpdateMessage} /> : null}
   </section>;
 }
 
@@ -457,11 +538,16 @@ function PlaidLinkLauncher({ session, onDone, onCancelled, compact = false }: { 
       completingRef.current = true;
       setStatus("Importing encrypted financial records…");
       try {
-        await invoke<PlaidSyncResult>("complete_plaid_link", { input: {
+        const initialSync = await invoke<PlaidSyncResult>("complete_plaid_link", { input: {
           sessionId: session.sessionId, sessionSecret: session.sessionSecret, publicToken,
           institutionId: metadata.institution?.institution_id ?? null, institutionName: metadata.institution?.name ?? null,
           selectedAccountIds: metadata.accounts.map(account => account.id),
         } });
+        if (initialSync.pendingConnections > 0) {
+          await synchronizePlaidHistory((attempt, maxAttempts) => {
+            setStatus(`Preparing transaction history… retry ${attempt} of ${maxAttempts}`);
+          });
+        }
         onDone();
       } catch (reason) { setStatus(`Import failed: ${String(reason)}`); }
     },
@@ -469,10 +555,34 @@ function PlaidLinkLauncher({ session, onDone, onCancelled, compact = false }: { 
   });
   useEffect(() => { if (ready) open(); }, [open, ready]);
   if (compact) return <span className="compact-link-status" role="status">{status}</span>;
-  return <div className="connect-card sandbox-link-card"><span>↗</span><strong>{status}</strong><small>{ready ? "Complete or cancel the Plaid window." : "Loading Plaid Link…"}</small></div>;
+  return <div className="connect-card sandbox-link-card"><span>↗</span><strong>{status}</strong><small>{ready ? "Complete or cancel the connection window." : "Loading secure connection…"}</small></div>;
 }
 
-function Calendar({ month, transactions, schedules, onMonthChange }: { month: Date; transactions: LedgerEntry[]; schedules: Schedule[]; onMonthChange: (month: Date) => void }) {
+function PlaidAccountUpdateLauncher({ session, onDone, onCancelled, onStatus }: { session: PlaidAccountUpdateSession; onDone: () => void; onCancelled: () => void; onStatus: (status: string) => void }) {
+  const completingRef = useRef(false);
+  const { open, ready } = usePlaidLink({
+    token: session.linkToken,
+    onSuccess: async (_publicToken, metadata) => {
+      completingRef.current = true;
+      onStatus("Applying account selection and removing deselected account data…");
+      try {
+        await invoke<PlaidSyncResult>("complete_plaid_account_update", { input: {
+          connectionId: session.connectionId,
+          selectedAccountIds: metadata.accounts.map(account => account.id),
+        } });
+        onDone();
+      } catch (reason) {
+        completingRef.current = false;
+        onStatus(`Account selection failed: ${String(reason)}`);
+      }
+    },
+    onExit: () => { if (!completingRef.current) onCancelled(); },
+  });
+  useEffect(() => { if (ready) open(); }, [open, ready]);
+  return null;
+}
+
+function Calendar({ month, transactions, schedules, onMonthChange, onAddTransaction }: { month: Date; transactions: LedgerEntry[]; schedules: Schedule[]; onMonthChange: (month: Date) => void; onAddTransaction: (date: string) => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [popoverAnchor, setPopoverAnchor] = useState<{ left: number; top: number } | null>(null);
   const [offset, setOffset] = useState(0);
@@ -502,21 +612,19 @@ function Calendar({ month, transactions, schedules, onMonthChange }: { month: Da
   const selectedItems = selected ? [...(transactionMap.get(selected) ?? []), ...scheduledEntriesFor(selected)] : [];
   useEffect(() => { if (!selected) return; const close = (event: PointerEvent) => { const target = event.target as HTMLElement; if (!surfaceRef.current?.contains(target) || !target.closest(".calendar-cell, .date-popover")) { setSelected(null); setPopoverAnchor(null); } }; document.addEventListener("pointerdown", close); return () => document.removeEventListener("pointerdown", close); }, [selected]);
   function changeMonth(delta: number) { setSelected(null); setPopoverAnchor(null); onMonthChange(new Date(year, monthIndex + delta, 1)); }
-  function selectDate(key: string, target: HTMLButtonElement) {
+  function selectDate(key: string, target: HTMLElement) {
     const surface = surfaceRef.current;
     if (!surface) { setSelected(key); return; }
     const cell = target.getBoundingClientRect(); const bounds = surface.getBoundingClientRect();
-    const popoverWidth = 336; const popoverHeight = 246; const margin = 12;
+    const popoverWidth = 336; const margin = 12;
     const left = Math.max(margin, Math.min(cell.left - bounds.left, bounds.width - popoverWidth - margin));
-    const below = bounds.bottom - cell.bottom;
-    const preferredTop = below >= popoverHeight + margin ? cell.bottom - bounds.top + 8 : cell.top - bounds.top - popoverHeight - 8;
-    const top = Math.max(margin, Math.min(preferredTop, bounds.height - popoverHeight - margin));
+    const top = cell.bottom - bounds.top + 8;
     setPopoverAnchor({ left, top }); setSelected(key);
   }
   function onPointerDown(event: React.PointerEvent<HTMLElement>) { if ((event.target as HTMLElement).closest("button")) return; const width = event.currentTarget.getBoundingClientRect().width; dragRef.current = { pointerId: event.pointerId, startX: event.clientX, width }; event.currentTarget.setPointerCapture(event.pointerId); }
   function onPointerMove(event: React.PointerEvent<HTMLElement>) { const drag = dragRef.current; if (!drag || drag.pointerId !== event.pointerId) return; setOffset(Math.max(-drag.width, Math.min(drag.width, event.clientX - drag.startX))); }
   function onPointerUp(event: React.PointerEvent<HTMLElement>) { const drag = dragRef.current; if (!drag || drag.pointerId !== event.pointerId) return; dragRef.current = null; const releaseOffset = event.clientX - drag.startX; const direction = Math.abs(releaseOffset) > drag.width / 2 ? (releaseOffset < 0 ? 1 : -1) : 0; setSettling(true); if (!direction) { setOffset(0); window.setTimeout(() => setSettling(false), 380); return; } setOffset(direction > 0 ? -drag.width : drag.width); window.setTimeout(() => { changeMonth(direction); setSettling(false); setOffset(0); }, 380); }
-  return <section className="calendar-widget" ref={surfaceRef}><div className="calendar-controls"><button onClick={() => changeMonth(-1)}>‹</button><strong>{monthTitle}</strong><button onClick={() => changeMonth(1)}>›</button></div><div className="calendar-viewport" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}><div className={`calendar-grid ${settling ? "settling" : ""}`} style={{ transform: `translateX(${offset}px)` }}>{["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(day => <div className="calendar-day-name" key={day}>{day}</div>)}{Array.from({ length: 42 }, (_, index) => { const date = new Date(start); date.setDate(start.getDate() + index); const key = date.toISOString().slice(0, 10); const entries = [...(transactionMap.get(key) ?? []), ...scheduledEntriesFor(key)]; const income = entries.filter(item => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0); const spend = entries.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0); return <button className={`calendar-cell ${date.getMonth() !== monthIndex ? "outside" : ""} ${selected === key ? "selected-cell" : ""}`} onClick={event => selectDate(key, event.currentTarget)} key={key}><span>{date.getDate()}</span>{income ? <small className="positive">+{formatMoney(income)}</small> : null}{spend ? <small className="negative">{formatMoney(spend)}</small> : null}</button>; })}</div></div>{selected && popoverAnchor ? <aside className="date-popover" style={popoverAnchor}><header><strong>{new Date(`${selected}T12:00:00`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</strong><button onClick={() => { setSelected(null); setPopoverAnchor(null); }}>×</button></header>{selectedItems.length === 0 ? <p className="empty-copy">No transactions or planned items.</p> : selectedItems.map(item => <div className="popover-item" key={item.id}><span className="popover-description" title={item.description}>{item.description}{item.scheduled ? <small>Planned · scheduled</small> : null}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</aside> : null}</section>;
+  return <section className="calendar-widget" ref={surfaceRef}><div className="calendar-controls"><button onClick={() => changeMonth(-1)}>‹</button><strong>{monthTitle}</strong><button onClick={() => changeMonth(1)}>›</button></div><div className="calendar-viewport" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}><div className={`calendar-grid ${settling ? "settling" : ""}`} style={{ transform: `translateX(${offset}px)` }}>{["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(day => <div className="calendar-day-name" key={day}>{day}</div>)}{Array.from({ length: 42 }, (_, index) => { const date = new Date(start); date.setDate(start.getDate() + index); const key = date.toISOString().slice(0, 10); const entries = [...(transactionMap.get(key) ?? []), ...scheduledEntriesFor(key)]; const income = entries.filter(item => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0); const spend = entries.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0); return <div className={`calendar-cell ${date.getMonth() !== monthIndex ? "outside" : ""} ${selected === key ? "selected-cell" : ""}`} key={key}><button type="button" className="calendar-cell-select" onClick={event => selectDate(key, event.currentTarget.parentElement ?? event.currentTarget)}><span>{date.getDate()}</span>{income ? <small className="positive">+{formatMoney(income)}</small> : null}{spend ? <small className="negative">{formatMoney(spend)}</small> : null}</button>{selected === key ? <button type="button" className="calendar-add-transaction" aria-label={`Add transaction on ${date.toLocaleDateString("en-US")}`} onClick={event => { event.stopPropagation(); onAddTransaction(key); }}><Plus aria-hidden="true" /></button> : null}</div>; })}</div></div>{selected && popoverAnchor ? <aside className="date-popover" style={popoverAnchor}><header><strong>{new Date(`${selected}T12:00:00`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</strong><button onClick={() => { setSelected(null); setPopoverAnchor(null); }}>×</button></header>{selectedItems.length === 0 ? <p className="empty-copy">No transactions or planned items.</p> : selectedItems.map(item => <div className="popover-item" key={item.id}><span className="popover-description" title={item.description}>{item.description}{item.scheduled ? <small>Planned · scheduled</small> : null}</span><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</aside> : null}</section>;
 }
 
 function AccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
@@ -529,20 +637,29 @@ function AccountDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
   return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>Add account</h2><button type="button" onClick={onClose}>×</button></header><label>Name<input name="name" required autoFocus placeholder="Everyday checking" /></label><label>Type<select name="type" defaultValue="checking"><option value="checking">Checking</option><option value="savings">Savings</option><option value="credit-card">Credit card</option><option value="investment">Investment</option><option value="loan">Loan</option></select></label><label>Opening balance<input name="balance" type="number" step="0.01" defaultValue="0" required /></label>{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button><button className="primary-action" type="submit">Save account</button></footer></form></div>;
 }
 
-function TransactionDialog({ accounts, categories, entry, onClose, onSaved }: { accounts: Account[]; categories: Category[]; entry: LedgerEntry | null; onClose: () => void; onSaved: () => void }) {
+function TransactionDialog({ accounts, categories, entry, initialDate, onClose, onSaved }: { accounts: Account[]; categories: Category[]; entry: LedgerEntry | null; initialDate?: string | null; onClose: () => void; onSaved: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [scheduleRepeat, setScheduleRepeat] = useState(false);
+  const [categoryMatch, setCategoryMatch] = useState<CategorizationMatch | null>(null);
+  useEffect(() => {
+    if (!entry) { setCategoryMatch(null); return; }
+    let cancelled = false;
+    void invoke<CategorizationMatch>("categorization_match", { transactionId: entry.id })
+      .then(result => { if (!cancelled) setCategoryMatch(result); })
+      .catch(reason => { if (!cancelled) setError(String(reason)); });
+    return () => { cancelled = true; };
+  }, [entry]);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); const form = new FormData(event.currentTarget);
     const input = { accountId: form.get("accountId"), transactionDate: form.get("date"), description: form.get("description"), amountCents: Math.round(Number(form.get("amount")) * 100), categoryId: form.get("categoryId") || null, notes: form.get("notes") || null, scheduleRecurrence: !entry && scheduleRepeat ? String(form.get("scheduleRecurrence")) : null };
-    try { if (entry) await invoke("update_transaction", { input: { id: entry.id, ...input } }); else await invoke("create_transaction", { input }); onSaved(); }
+    try { if (entry) await invoke("update_transaction", { input: { id: entry.id, ...input, categoryScope: form.get("categoryScope") || "single" } }); else await invoke("create_transaction", { input }); onSaved(); }
     catch (reason) { setError(String(reason)); }
   }
-  return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>{entry ? "Edit transaction" : "Add transaction"}</h2><button type="button" onClick={onClose}>×</button></header>{accounts.length === 0 ? <p className="empty-copy">Create an account first.</p> : <><label>Account<select name="accountId" required defaultValue={entry?.accountId}>{accounts.map(account => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label><label>Date<input name="date" type="date" defaultValue={entry?.transactionDate ?? new Date().toISOString().slice(0, 10)} required /></label><label>Description<input name="description" required placeholder="Groceries" defaultValue={entry?.description} /></label><label>Amount<input name="amount" type="number" step="0.01" required placeholder="-48.20" defaultValue={entry ? (entry.amountCents / 100).toFixed(2) : undefined} /></label><label>Category<select name="categoryId" defaultValue={entry?.categoryId ?? ""}><option value="">Uncategorized</option>{categories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label>Notes<textarea name="notes" rows={3} /></label>{!entry ? <><label className="repeat-toggle"><input type="checkbox" checked={scheduleRepeat} onChange={event => setScheduleRepeat(event.target.checked)} /> Schedule this again</label>{scheduleRepeat ? <label>Repeats<select name="scheduleRecurrence" defaultValue="monthly"><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="biweekly">Every 2 weeks</option><option value="monthly">Monthly</option><option value="quarterly">Every 3 months</option><option value="yearly">Yearly</option></select></label> : null}</> : null}</>}{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button>{accounts.length > 0 ? <button className="primary-action" type="submit">{entry ? "Save changes" : "Save transaction"}</button> : null}</footer></form></div>;
+  return <div className="dialog-backdrop"><form className="dialog" onSubmit={submit}><header><h2>{entry ? "Edit transaction" : "Add transaction"}</h2><button type="button" onClick={onClose}>×</button></header>{accounts.length === 0 ? <p className="empty-copy">Create an account first.</p> : <><label>Account<select name="accountId" required defaultValue={entry?.accountId}>{accounts.map(account => <option key={account.id} value={account.id}>{account.name}</option>)}</select></label><label>Date<input name="date" type="date" defaultValue={entry?.transactionDate ?? initialDate ?? new Date().toISOString().slice(0, 10)} required /></label><label>Description<input name="description" required defaultValue={entry?.description} /></label><label>Amount<input name="amount" type="number" step="0.01" required defaultValue={entry ? (entry.amountCents / 100).toFixed(2) : undefined} /></label><div className="category-edit-row"><label>Category<select name="categoryId" defaultValue={entry?.categoryId ?? ""}><option value="">Uncategorized</option>{categories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>{entry ? <label>Apply category to<select name="categoryScope" defaultValue="single"><option value="single">Only this transaction</option><option value="matching">All {categoryMatch?.matchingTransactions ?? "matching"} existing matches</option><option value="matching-and-future">Existing matches + future imports</option></select></label> : null}</div>{entry && categoryMatch && categoryMatch.matchingTransactions > 1 ? <p className="category-match-copy">Money Map found {categoryMatch.matchingTransactions} transactions from this merchant across connected accounts.</p> : null}<label>Notes<textarea name="notes" rows={3} /></label>{!entry ? <><label className="repeat-toggle"><input type="checkbox" checked={scheduleRepeat} onChange={event => setScheduleRepeat(event.target.checked)} /> Schedule this again</label>{scheduleRepeat ? <label>Repeats<select name="scheduleRecurrence" defaultValue="monthly"><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="biweekly">Every 2 weeks</option><option value="monthly">Monthly</option><option value="quarterly">Every 3 months</option><option value="yearly">Yearly</option></select></label> : null}</> : null}</>}{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button>{accounts.length > 0 ? <button className="primary-action" type="submit">{entry ? "Save changes" : "Save transaction"}</button> : null}</footer></form></div>;
 }
 
-function ScheduleDialog({ accounts, schedule, onClose, onSaved }: { accounts: Account[]; schedule: Schedule | null; onClose: () => void; onSaved: () => void }) {
+function ScheduleDialog({ accounts, schedule, seed, onClose, onSaved }: { accounts: Account[]; schedule: Schedule | null; seed?: ScheduleSeed | null; onClose: () => void; onSaved: () => void }) {
   const [error, setError] = useState<string | null>(null);
   async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); const form = new FormData(event.currentTarget); const input = { accountId: form.get("accountId"), startDate: form.get("date"), endDate: form.get("endDate") || null, description: form.get("description"), amountCents: Math.round(Number(form.get("amount")) * 100), recurrence: form.get("recurrence") }; try { if (schedule) await invoke("update_schedule", { input: { id: schedule.id, ...input } }); else await invoke("create_schedule", { input }); onSaved(); } catch (reason) { setError(String(reason)); } }
-  return <div className="dialog-backdrop"><form className="dialog schedule-dialog" onSubmit={submit}><header><h2>{schedule ? "Edit scheduled transaction" : "Add scheduled transaction"}</h2><button type="button" onClick={onClose}>×</button></header>{accounts.length === 0 ? <p className="empty-copy">Create an account first.</p> : <><label>Account<select name="accountId" defaultValue={schedule?.accountId}>{accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label><div className="schedule-dialog-row"><label>Starts<input name="date" type="date" defaultValue={schedule?.startDate ?? new Date().toISOString().slice(0, 10)} /></label><label>Ends (optional)<input name="endDate" type="date" defaultValue={schedule?.endDate ?? ""} /></label></div><label>Description<input name="description" required defaultValue={schedule?.description} /></label><div className="schedule-dialog-row"><label>Amount<input name="amount" type="number" step="0.01" required defaultValue={schedule ? (schedule.amountCents / 100).toFixed(2) : undefined} /></label><label>Repeats<select name="recurrence" defaultValue={schedule?.recurrence ?? "monthly"}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="biweekly">Every 2 weeks</option><option value="monthly">Monthly</option><option value="quarterly">Every 3 months</option><option value="yearly">Yearly</option></select></label></div></>}{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button>{accounts.length > 0 ? <button className="primary-action" type="submit">{schedule ? "Save changes" : "Save schedule"}</button> : null}</footer></form></div>;
+  return <div className="dialog-backdrop"><form className="dialog schedule-dialog" onSubmit={submit}><header><h2>{schedule ? "Edit scheduled transaction" : "Add scheduled transaction"}</h2><button type="button" onClick={onClose}>×</button></header>{accounts.length === 0 ? <p className="empty-copy">Create an account first.</p> : <><label>Account<select name="accountId" defaultValue={schedule?.accountId ?? seed?.accountId}>{accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></label><div className="schedule-dialog-row"><label>Starts<input name="date" type="date" defaultValue={schedule?.startDate ?? seed?.transactionDate ?? new Date().toISOString().slice(0, 10)} /></label><label>Ends (optional)<input name="endDate" type="date" defaultValue={schedule?.endDate ?? ""} /></label></div><label>Description<input name="description" required defaultValue={schedule?.description ?? seed?.description} /></label><div className="schedule-dialog-row"><label>Amount<input name="amount" type="number" step="0.01" required defaultValue={schedule ? (schedule.amountCents / 100).toFixed(2) : seed ? (seed.amountCents / 100).toFixed(2) : undefined} /></label><label>Repeats<select name="recurrence" defaultValue={schedule?.recurrence ?? "monthly"}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="biweekly">Every 2 weeks</option><option value="monthly">Monthly</option><option value="quarterly">Every 3 months</option><option value="yearly">Yearly</option></select></label></div></>}{error ? <p className="form-error">{error}</p> : null}<footer><button type="button" onClick={onClose}>Cancel</button>{accounts.length > 0 ? <button className="primary-action" type="submit">{schedule ? "Save changes" : "Save schedule"}</button> : null}</footer></form></div>;
 }

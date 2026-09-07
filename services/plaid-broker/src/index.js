@@ -146,7 +146,10 @@ async function syncTransactions(env, connection) {
   try {
     const accessToken = await decryptToken(connection.access_token_ciphertext, connection.access_token_iv, env.TOKEN_ENCRYPTION_KEY);
     do {
-      const result = await plaidPost(env, "/transactions/sync", { access_token: accessToken, ...(cursor ? { cursor } : {}) });
+      const result = await plaidPost(env, "/transactions/sync", {
+        access_token: accessToken,
+        ...(cursor !== null && cursor !== undefined ? { cursor } : {})
+      });
       added.push(...(result.added ?? []));
       modified.push(...(result.modified ?? []));
       removed.push(...(result.removed ?? []));
