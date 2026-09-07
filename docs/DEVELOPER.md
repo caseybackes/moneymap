@@ -55,6 +55,8 @@ The proposed contracts, threat model, and MCP adapter decision are under [`docs/
 
 Schedule mutations use schema migration 11 and the persisted lifecycle described in [`docs/ai-tools/PROPOSAL-LIFECYCLE.md`](ai-tools/PROPOSAL-LIFECYCLE.md). Keep confirmation out of agent-facing registries: only the native user-confirmation adapter may mint the two-minute artifact bound to the profile, proposal version, and effect digest. Execution must remain one immediate transaction covering precondition checks, schedule mutation, artifact consumption, audit, and idempotent outcome.
 
+The delivered native recurring-bill path and its versioned synthetic fixture are documented in [`docs/ai-tools/RECURRING-BILL-VERTICAL-SLICE.md`](ai-tools/RECURRING-BILL-VERTICAL-SLICE.md). Verify the fixture manifest from the repository root with `node .\scripts\verify-recurring-bill-fixture.mjs`. The native path has no model, MCP, memory, Plaid, Worker, or Production-profile dependency.
+
 ## Tests
 
 From `apps/desktop/src-tauri`:

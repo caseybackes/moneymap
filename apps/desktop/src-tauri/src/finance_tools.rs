@@ -776,7 +776,9 @@ pub fn detect_recurring(
         "SELECT t.id,t.account_id,a.name,t.transaction_date,CAST(julianday(t.transaction_date) AS INTEGER),\
          t.description,{party_expression},t.amount_cents,t.source,t.updated_at \
          FROM transactions t JOIN accounts a ON a.id=t.account_id \
-         WHERE t.source <> 'scheduled'{posted_predicate}"
+         LEFT JOIN categories c ON c.id=t.category_id \
+         WHERE t.source <> 'scheduled' AND t.amount_cents < 0 \
+         AND lower(COALESCE(c.name,'')) NOT LIKE '%transfer%'{posted_predicate}"
     );
     let mut values = Vec::new();
     push_in_filter(&mut sql, &mut values, "t.account_id", &request.account_ids);
@@ -900,6 +902,58 @@ pub fn detect_recurring(
 mod tests {
     use super::*;
 
+    const RECURRING_FIXTURE: &[u8] = include_bytes!("../../../../test-fixtures/recurring-bill/v1/data.json");
+    const RECURRING_MANIFEST: &str = include_str!("../../../../test-fixtures/recurring-bill/v1/manifest.json");
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FixtureManifest {
+        fixture_format_version: u8,
+        fixture_id: String,
+        data_file: String,
+        sha256: String,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RecurringFixture {
+        fixture_id: String,
+        categories: Vec<FixtureCategory>,
+        accounts: Vec<FixtureAccount>,
+        transactions: Vec<FixtureTransaction>,
+        schedules: Vec<FixtureSchedule>,
+    }
+
+    #[derive(Deserialize)]
+    struct FixtureCategory { id: String, name: String }
+
+    #[derive(Deserialize)]
+    struct FixtureAccount { id: String, name: String }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FixtureTransaction {
+        id: String,
+        account_id: String,
+        date: String,
+        description: String,
+        merchant_key: String,
+        amount_cents: i64,
+        category_id: String,
+        pending: bool,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct FixtureSchedule {
+        id: String,
+        account_id: String,
+        start_date: String,
+        description: String,
+        amount_cents: i64,
+        recurrence: String,
+    }
+
     fn database() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(
@@ -920,6 +974,43 @@ mod tests {
     }
 
     fn actor(scopes: Vec<RecordScope>) -> Actor { Actor::read_only("test-agent", ActorType::InAppHarness, scopes) }
+
+    fn versioned_recurring_fixture() -> Connection {
+        let manifest: FixtureManifest = serde_json::from_str(RECURRING_MANIFEST).unwrap();
+        let fixture: RecurringFixture = serde_json::from_slice(RECURRING_FIXTURE).unwrap();
+        assert_eq!(manifest.fixture_format_version, 1);
+        assert_eq!(manifest.fixture_id, fixture.fixture_id);
+        assert_eq!(manifest.data_file, "data.json");
+        let canonical_fixture = String::from_utf8_lossy(RECURRING_FIXTURE).replace("\r\n", "\n");
+        assert_eq!(format!("{:x}", Sha256::digest(canonical_fixture.as_bytes())), manifest.sha256);
+
+        let connection = database();
+        connection.execute("DELETE FROM accounts", []).unwrap();
+        connection.execute("DELETE FROM categories", []).unwrap();
+        for category in fixture.categories {
+            connection.execute("INSERT INTO categories(id,name) VALUES(?1,?2)", (category.id, category.name)).unwrap();
+        }
+        for account in fixture.accounts {
+            connection.execute("INSERT INTO accounts(id,name) VALUES(?1,?2)", (account.id, account.name)).unwrap();
+        }
+        for transaction in fixture.transactions {
+            connection.execute(
+                "INSERT INTO transactions(id,account_id,transaction_date,description,amount_cents,category_id,source,external_transaction_id,merchant_key,pending,updated_at) \
+                 VALUES(?1,?2,?3,?4,?5,?6,'fixture',NULL,?7,?8,'2026-05-21T00:00:00Z')",
+                rusqlite::params![transaction.id, transaction.account_id, transaction.date, transaction.description,
+                    transaction.amount_cents, transaction.category_id, transaction.merchant_key, transaction.pending],
+            ).unwrap();
+        }
+        for schedule in fixture.schedules {
+            connection.execute(
+                "INSERT INTO scheduled_transactions(id,account_id,start_date,end_date,description,amount_cents,recurrence,active,last_processed_occurrence,created_at) \
+                 VALUES(?1,?2,?3,NULL,?4,?5,?6,1,NULL,'2026-05-01T00:00:00Z')",
+                rusqlite::params![schedule.id, schedule.account_id, schedule.start_date, schedule.description,
+                    schedule.amount_cents, schedule.recurrence],
+            ).unwrap();
+        }
+        connection
+    }
 
     fn legacy_database() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
@@ -1040,6 +1131,35 @@ mod tests {
         assert_eq!(candidate.matching_schedule_refs.len(), 1);
         assert_eq!(candidate.matching_schedule_refs[0].id, "money-map:schedule:loan-schedule");
         assert_eq!(candidate.candidate_temporal_roles, vec!["settlement_date"]);
+    }
+
+    #[test]
+    fn versioned_recurring_fixture_covers_detection_boundaries() {
+        let connection = versioned_recurring_fixture();
+        let detect_actor = actor(vec![RecordScope::RecurringAnalysis, RecordScope::Schedules]);
+        let result = detect_recurring(&connection, &detect_actor, &RecurringDetectRequest::default()).unwrap();
+
+        assert_eq!(result.scanned_records, 7);
+        assert_eq!(result.candidates.len(), 2);
+        assert!(!result.truncated);
+        assert!(result.candidates.iter().all(|candidate| candidate.party_key != "monthly transfer"));
+
+        let electric = result.candidates.iter().find(|candidate| candidate.party_key == "example electric").unwrap();
+        assert_eq!(electric.evidence.len(), 4);
+        assert_eq!(electric.recurrence, "monthly");
+        assert_eq!(electric.next_expected_date.as_deref(), Some("2026-05-20"));
+        assert_eq!(electric.amount_distribution.minimum_cents, -9_500);
+        assert_eq!(electric.amount_distribution.median_cents, -8_800);
+        assert_eq!(electric.amount_distribution.maximum_cents, -8_500);
+        assert!(electric.matching_schedule_refs.is_empty());
+
+        let rent = result.candidates.iter().find(|candidate| candidate.party_key == "example apartment rent").unwrap();
+        assert_eq!(rent.matching_schedule_refs.len(), 1);
+        assert_eq!(rent.matching_schedule_refs[0].id, "money-map:schedule:rent-schedule");
+
+        connection.execute("DELETE FROM scheduled_transactions", []).unwrap();
+        let without_schedules = detect_recurring(&connection, &detect_actor, &RecurringDetectRequest::default()).unwrap();
+        assert!(without_schedules.candidates.iter().all(|candidate| candidate.matching_schedule_refs.is_empty()));
     }
 
     #[test]

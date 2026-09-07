@@ -45,6 +45,8 @@ Money Map is an installed, local-first desktop application for one person to mod
 
 - Users can create future scheduled transactions.
 - The app can recognize recurring transactions and suggest a schedule.
+- Recurring bill detection uses posted outflows, excludes transfer-category transactions and positive refunds, groups provider description variants by merchant identity when available, and shows the observations and variable amount range used for the suggestion.
+- A recurring suggestion remains inert until the user reviews or corrects its schedule fields and explicitly confirms the exact proposal. Existing matching schedules are disclosed instead of silently duplicated.
 - Scheduled transactions contribute to future calendar totals and financial projections.
 - User-created schedules support daily, weekly, and monthly recurrence, optional end dates, and skipping individual occurrences.
 - Users can edit schedules. Recording an occurrence retains a session-only Added row in the schedule view until the user navigates away.

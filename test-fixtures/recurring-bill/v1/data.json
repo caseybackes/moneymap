@@ -1,0 +1,28 @@
+{
+  "fixtureId": "money-map-recurring-bill-v1",
+  "categories": [
+    { "id": "category-utilities", "name": "Utilities" },
+    { "id": "category-housing", "name": "Housing" },
+    { "id": "category-transfers", "name": "Transfers" }
+  ],
+  "accounts": [
+    { "id": "fixture-checking", "name": "Fixture Checking" },
+    { "id": "fixture-savings", "name": "Fixture Savings" }
+  ],
+  "transactions": [
+    { "id": "electric-01", "accountId": "fixture-checking", "date": "2026-01-20", "description": "EXAMPLE ELECTRIC 1001", "merchantKey": "example electric", "amountCents": -8500, "categoryId": "category-utilities", "pending": false },
+    { "id": "electric-02", "accountId": "fixture-checking", "date": "2026-02-20", "description": "Example Electric AUTOPAY", "merchantKey": "example electric", "amountCents": -9200, "categoryId": "category-utilities", "pending": false },
+    { "id": "electric-03", "accountId": "fixture-checking", "date": "2026-03-20", "description": "EXAMPLE ELECTRIC WEB 338", "merchantKey": "example electric", "amountCents": -8800, "categoryId": "category-utilities", "pending": false },
+    { "id": "electric-04", "accountId": "fixture-checking", "date": "2026-04-20", "description": "Example Electric", "merchantKey": "example electric", "amountCents": -9500, "categoryId": "category-utilities", "pending": false },
+    { "id": "electric-refund", "accountId": "fixture-checking", "date": "2026-04-22", "description": "Example Electric Refund", "merchantKey": "example electric", "amountCents": 1500, "categoryId": "category-utilities", "pending": false },
+    { "id": "electric-pending", "accountId": "fixture-checking", "date": "2026-05-20", "description": "Example Electric Pending", "merchantKey": "example electric", "amountCents": -9700, "categoryId": "category-utilities", "pending": true },
+    { "id": "rent-01", "accountId": "fixture-checking", "date": "2026-02-01", "description": "Example Apartment Rent", "merchantKey": "example apartment rent", "amountCents": -125000, "categoryId": "category-housing", "pending": false },
+    { "id": "rent-02", "accountId": "fixture-checking", "date": "2026-03-01", "description": "Example Apartment Rent", "merchantKey": "example apartment rent", "amountCents": -125000, "categoryId": "category-housing", "pending": false },
+    { "id": "rent-03", "accountId": "fixture-checking", "date": "2026-04-01", "description": "Example Apartment Rent", "merchantKey": "example apartment rent", "amountCents": -125000, "categoryId": "category-housing", "pending": false },
+    { "id": "transfer-01", "accountId": "fixture-checking", "date": "2026-03-05", "description": "Monthly transfer to savings", "merchantKey": "monthly transfer", "amountCents": -50000, "categoryId": "category-transfers", "pending": false },
+    { "id": "transfer-02", "accountId": "fixture-checking", "date": "2026-04-05", "description": "Monthly transfer to savings", "merchantKey": "monthly transfer", "amountCents": -50000, "categoryId": "category-transfers", "pending": false }
+  ],
+  "schedules": [
+    { "id": "rent-schedule", "accountId": "fixture-checking", "startDate": "2026-05-01", "description": "Example Apartment Rent", "amountCents": -125000, "recurrence": "monthly" }
+  ]
+}

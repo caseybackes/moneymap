@@ -1,6 +1,6 @@
 # Schedule proposal lifecycle
 
-Status: implemented for Linear ID-111
+Status: implemented and exercised end to end through Linear ID-113
 
 ## Boundary
 
@@ -35,7 +35,7 @@ The lifecycle supports create and update for the cadences already represented by
 
 ## Downstream contract
 
-ID-112 should:
+The native recurring-review surface:
 
 1. render `before`, `effect`, evidence, assumptions, expiry, and effect digest;
 2. call the native confirmation adapter only from an explicit user action;
@@ -43,4 +43,4 @@ ID-112 should:
 4. treat expired, stale, rejected, and failed proposals as non-executable and explain the recorded state;
 5. refresh the schedules projection after an executed result.
 
-ID-113 should exercise the complete detect-to-review-to-confirm-to-execute path with a versioned synthetic fixture and verify that no Plaid credential or Production profile is required.
+The complete detect-to-review-to-confirm-to-execute path is covered by the versioned synthetic fixture and lifecycle suites described in [`RECURRING-BILL-VERTICAL-SLICE.md`](RECURRING-BILL-VERTICAL-SLICE.md). These tests require no Plaid credential or Production profile.

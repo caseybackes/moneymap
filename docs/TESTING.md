@@ -23,3 +23,20 @@ npm test
 ```
 
 These tests deliberately use only in-memory fixtures. They neither open Link nor consume a Sandbox or production connection slot.
+
+## Recurring bill vertical-slice matrix
+
+Validate the Git-tracked fixture and its manifest from the repository root:
+
+```powershell
+node .\scripts\verify-recurring-bill-fixture.mjs
+```
+
+| Scenario | Automated assertion | Required result |
+| --- | --- | --- |
+| Fixture integrity | Hash `test-fixtures/recurring-bill/v1/data.json` and compare it with the versioned manifest. | Fixture identity, format version, and exact SHA-256 digest match. |
+| Candidate boundaries | Detect the synthetic electric bill, rent, refund, pending charge, and recurring savings transfer. | Exactly the electric bill and rent are candidates; refund, pending charge, and transfer are excluded. |
+| Variable amounts and duplicate grouping | Four electric descriptions share one merchant key with different signed integer-cent amounts. | One monthly candidate cites four observations and reports deterministic minimum, median, maximum, and next settlement date. |
+| Existing and absent schedules | Detect once with the rent schedule and once after schedules are removed. | Rent cites its existing schedule; electric has no match; after removal all match lists are empty. |
+| Proposal lifecycle | Exercise create/replay, native confirmation, rejection, expiry, stale evidence, fabricated confirmation, concurrent confirmation, execution, and execution replay. | Only a current native-confirmed proposal executes; mutation and audit are atomic and replay creates no duplicate schedule. |
+| Environment isolation | Run Production, Sandbox, rehearsal, and frontend build checks without launching the app. | Matrices pass without Plaid calls, credentials, deployed secrets, Production-profile access, Worker deployment, installer creation, or installed-app replacement. |

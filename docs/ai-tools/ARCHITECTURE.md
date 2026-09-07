@@ -1,6 +1,6 @@
 # Money Map AI capability architecture
 
-Status: read capabilities and schedule proposal lifecycle implemented through Linear ID-111
+Status: native recurring-bill vertical slice implemented through Linear ID-113
 Contract generation: `docs/ai-tools/schemas/v1/`
 
 ## Security and ownership boundary
