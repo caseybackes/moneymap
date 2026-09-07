@@ -45,6 +45,14 @@ Do not create timestamped artifact folders. The development executable is always
 - Money is persisted as integer cents. Do not introduce JavaScript floating point at a persistence boundary.
 - Do not commit databases, provider tokens, generated artifacts, `.wrangler/`, `node_modules`, or `.tooling` content.
 
+## Native finance capabilities
+
+Agent-facing finance reads live in the Rust `finance_tools` module and remain independent of Tauri or MCP transport details. The first slice provides a versioned capability registry, actor/scope authorization, bounded transaction and schedule searches, and evidence-producing recurring detection. Tauri commands are thin adapters over those functions.
+
+These commands use an existing-profile-only SQLCipher opener. It refuses a missing database or credential, opens with `SQLITE_OPEN_READ_ONLY`, enables `PRAGMA query_only`, and never creates directories, databases, keys, or migrations. The older renderer commands still use the migration-capable application connection until they are deliberately moved behind the same application-service boundary.
+
+The proposed contracts, threat model, and MCP adapter decision are under [`docs/ai-tools/`](ai-tools/). MCP remains a later optional stdio adapter over the native registry; it does not own financial domain logic.
+
 ## Tests
 
 From `apps/desktop/src-tauri`:

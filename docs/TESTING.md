@@ -1,9 +1,10 @@
 # Money Map test matrix
 
-Run the desktop persistence regression suite from `apps/desktop/src-tauri`:
+Run both desktop persistence configurations from `apps/desktop/src-tauri`:
 
 ```powershell
-cargo test --features sandbox-dev
+cargo test
+cargo test --no-default-features --features sandbox-dev
 ```
 
 | Scenario | Automated assertion | Required result |

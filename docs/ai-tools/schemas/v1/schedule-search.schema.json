@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://money-map.local/schemas/ai-tools/v1/schedule-search.schema.json",
+  "title": "finance.schedules.search payload v1",
+  "oneOf": [
+    { "$ref": "#/$defs/Request" },
+    { "$ref": "#/$defs/Result" }
+  ],
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageType", "filters", "page", "extensions"],
+      "properties": {
+        "messageType": { "const": "request" },
+        "filters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "accountRefs": { "type": "array", "items": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" }, "maxItems": 100 },
+            "partyRefs": { "type": "array", "items": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" }, "maxItems": 100 },
+            "obligationRefs": { "type": "array", "items": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" }, "maxItems": 100 },
+            "status": { "type": "array", "items": { "enum": ["active", "paused", "completed", "cancelled"] }, "uniqueItems": true },
+            "direction": { "enum": ["inflow", "outflow"] },
+            "nextOnOrAfter": { "type": "string", "format": "date" },
+            "nextOnOrBefore": { "type": "string", "format": "date" },
+            "text": { "type": "string", "minLength": 1, "maxLength": 300 },
+            "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+          }
+        },
+        "page": { "$ref": "capability-envelope.schema.json#/$defs/PageRequest" },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "Schedule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "name", "accountRef", "direction", "amount", "cadence", "temporalRole", "startDate", "status", "nextOccurrenceOn", "extensions"],
+      "properties": {
+        "ref": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "accountRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "partyRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "obligationRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "direction": { "enum": ["inflow", "outflow"] },
+        "amount": { "$ref": "capability-envelope.schema.json#/$defs/Money" },
+        "amountPolicy": { "enum": ["fixed", "estimate", "statement_amount", "variable"] },
+        "cadence": { "enum": ["weekly", "biweekly", "semimonthly", "monthly", "quarterly", "semiannual", "annual", "custom"] },
+        "cadenceExtension": { "type": "object" },
+        "temporalRole": { "enum": ["due_date", "planned_date", "autopay_date", "expected_settlement_date"] },
+        "startDate": { "type": "string", "format": "date" },
+        "endDate": { "type": ["string", "null"], "format": "date" },
+        "status": { "enum": ["active", "paused", "completed", "cancelled"] },
+        "nextOccurrenceOn": { "type": ["string", "null"], "format": "date" },
+        "evidence": { "type": "array", "items": { "$ref": "capability-envelope.schema.json#/$defs/EvidenceRef" } },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "Result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageType", "schedules", "pageInfo", "freshness", "extensions"],
+      "properties": {
+        "messageType": { "const": "result" },
+        "schedules": { "type": "array", "items": { "$ref": "#/$defs/Schedule" } },
+        "pageInfo": { "$ref": "capability-envelope.schema.json#/$defs/PageInfo" },
+        "freshness": { "$ref": "capability-envelope.schema.json#/$defs/Freshness" },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    }
+  }
+}

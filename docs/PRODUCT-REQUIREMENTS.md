@@ -35,6 +35,11 @@ Money Map is an installed, local-first desktop application for one person to mod
 - An LLM may normalize payee/description data and suggest categories.
 - AI suggestions require user approval before changing financial records.
 - A manual transaction may remain uncategorized pending user review or an AI suggestion; when a category is selected, it must refer to a user-maintained category.
+- AI-facing finance capabilities are implemented as typed Rust application tools over the encrypted local profile. Tauri, an in-app assistant, and an optional external adapter must use the same authorization, evidence, proposal, and audit rules.
+- Read results carry stable record references, source/freshness information, bounded pagination, and integer-cent money values. Derived results identify their evidence, assumptions, and confidence.
+- AI clients may read, derive, and create inspectable proposals within granted scopes. They cannot directly execute financial-record mutations or external financial actions.
+- A proposed financial-record mutation requires an exact, short-lived confirmation artifact created after Money Map renders the change for user review. Execution revalidates the proposal, confirmation, expiry, idempotency, and record preconditions.
+- An optional MCP adapter is disabled by default and remains a replaceable transport over native capabilities. It never exposes SQL, database keys, provider credentials, broker secrets, or a generic command executor.
 
 ### Scheduled transactions
 
@@ -75,7 +80,7 @@ Money Map is an installed, local-first desktop application for one person to mod
 
 - Statement-file import; the first non-connected ingestion workflow is manual transaction entry.
 - Investment portfolio synchronization after TradeStation OAuth authorization.
-- An LLM chat interface for constructing financial scenarios.
+- An LLM chat interface that constructs numerical scenario inputs. A cited finance-query and proposal interface is tracked separately and does not replace the structured scenario editor.
 
 ## Open product decisions
 

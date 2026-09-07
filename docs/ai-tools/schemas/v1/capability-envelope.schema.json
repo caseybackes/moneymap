@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://money-map.local/schemas/ai-tools/v1/capability-envelope.schema.json",
+  "title": "Money Map capability envelope v1",
+  "oneOf": [
+    { "$ref": "#/$defs/RequestEnvelope" },
+    { "$ref": "#/$defs/ResultEnvelope" }
+  ],
+  "$defs": {
+    "Version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+    },
+    "Extensions": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z][A-Za-z0-9_.-]*$" },
+      "additionalProperties": true
+    },
+    "RecordRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id", "version"],
+      "properties": {
+        "kind": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "extensions": { "$ref": "#/$defs/Extensions" }
+      }
+    },
+    "EvidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "role"],
+      "properties": {
+        "ref": { "$ref": "#/$defs/RecordRef" },
+        "role": { "enum": ["observation", "statement", "derived", "user_assertion", "external_citation"] },
+        "observedAt": { "type": "string", "format": "date-time" },
+        "extensions": { "$ref": "#/$defs/Extensions" }
+      }
+    },
+    "Money": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "amountCents"],
+      "properties": {
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+        "amountCents": { "type": "integer" },
+        "extensions": { "$ref": "#/$defs/Extensions" }
+      }
+    },
+    "ActorContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actorId", "actorType", "profileRef", "scopes"],
+      "properties": {
+        "actorId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "actorType": { "enum": ["user", "in_app_harness", "local_mcp_client", "system"] },
+        "profileRef": { "$ref": "#/$defs/RecordRef" },
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^finance:[a-z][a-z0-9._-]*(?::[a-z][a-z0-9._-]*)*$" }
+        },
+        "grantId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "extensions": { "$ref": "#/$defs/Extensions" }
+      }
+    },
+    "Freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asOf", "status"],
+      "properties": {
+        "asOf": { "type": "string", "format": "date-time" },
+        "status": { "enum": ["current", "stale", "partial", "unknown"] },
+        "maxAgeSeconds": { "type": "integer", "minimum": 0 },
+        "sourceObservedAt": { "type": "string", "format": "date-time" },
+        "extensions": { "$ref": "#/$defs/Extensions" }
+      }
+    },
+    "PageRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 25 },
+        "cursor": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      }
+    },
+    "PageInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hasMore"],
+      "properties": {
+        "hasMore": { "type": "boolean" },
+        "nextCursor": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "returned": { "type": "integer", "minimum": 0 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "hasMore": { "const": true } }, "required": ["hasMore"] },
+          "then": { "required": ["nextCursor"] }
+        }
+      ]
+    },
+    "Warning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "relatedRefs": { "type": "array", "items": { "$ref": "#/$defs/RecordRef" } },
+        "extensions": { "$ref": "#/$defs/Extensions" }
+      }
+    },
+    "EnvelopeCore": {
+      "type": "object",
+      "required": ["messageType", "schemaVersion", "capability", "capabilityVersion", "requestId", "actor", "extensions"],
+      "properties": {
+        "messageType": { "enum": ["request", "result"] },
+        "schemaVersion": { "const": "1.0.0" },
+        "capability": { "type": "string", "pattern": "^finance\\.[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9]*)+$" },
+        "capabilityVersion": { "$ref": "#/$defs/Version" },
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "actor": { "$ref": "#/$defs/ActorContext" },
+        "extensions": { "$ref": "#/$defs/Extensions" }
+      }
+    },
+    "RequestEnvelope": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeCore" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["messageType", "schemaVersion", "capability", "capabilityVersion", "requestId", "actor", "payload", "extensions"],
+          "properties": {
+            "messageType": { "const": "request" },
+            "schemaVersion": { "const": "1.0.0" },
+            "capability": { "type": "string" },
+            "capabilityVersion": { "$ref": "#/$defs/Version" },
+            "requestId": { "type": "string" },
+            "actor": { "$ref": "#/$defs/ActorContext" },
+            "payload": { "type": "object" },
+            "extensions": { "$ref": "#/$defs/Extensions" }
+          }
+        }
+      ]
+    },
+    "ResultEnvelope": {
+      "allOf": [
+        { "$ref": "#/$defs/EnvelopeCore" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["messageType", "schemaVersion", "capability", "capabilityVersion", "requestId", "actor", "status", "generatedAt", "freshness", "warnings", "payload", "extensions"],
+          "properties": {
+            "messageType": { "const": "result" },
+            "schemaVersion": { "const": "1.0.0" },
+            "capability": { "type": "string" },
+            "capabilityVersion": { "$ref": "#/$defs/Version" },
+            "requestId": { "type": "string" },
+            "actor": { "$ref": "#/$defs/ActorContext" },
+            "status": { "enum": ["ok", "partial", "rejected", "conflict", "error"] },
+            "generatedAt": { "type": "string", "format": "date-time" },
+            "freshness": { "$ref": "#/$defs/Freshness" },
+            "warnings": { "type": "array", "items": { "$ref": "#/$defs/Warning" } },
+            "payload": { "type": "object" },
+            "extensions": { "$ref": "#/$defs/Extensions" }
+          }
+        }
+      ]
+    }
+  }
+}

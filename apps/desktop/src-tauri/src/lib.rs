@@ -1,3 +1,4 @@
+mod finance_tools;
 mod profile_backup;
 mod recovery_state;
 
@@ -1202,6 +1203,54 @@ fn ledger_data(app: AppHandle) -> Result<LedgerData, String> {
     Ok(LedgerData { transactions })
 }
 
+fn native_finance_read_actor() -> finance_tools::Actor {
+    finance_tools::Actor::read_only(
+        "money-map-native-ui",
+        finance_tools::ActorType::User,
+        vec![
+            finance_tools::RecordScope::Capabilities,
+            finance_tools::RecordScope::Transactions,
+            finance_tools::RecordScope::Schedules,
+            finance_tools::RecordScope::RecurringAnalysis,
+        ],
+    )
+}
+
+#[tauri::command]
+fn finance_capabilities_list() -> Result<Vec<finance_tools::CapabilityDescriptor>, String> {
+    finance_tools::list_capabilities(&native_finance_read_actor()).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn finance_transactions_search(
+    app: AppHandle,
+    input: finance_tools::TransactionSearchRequest,
+) -> Result<finance_tools::Page<finance_tools::TransactionRecord>, String> {
+    let (connection, _) = open_existing_database_read_only(&app)?;
+    finance_tools::search_transactions(&connection, &native_finance_read_actor(), &input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn finance_schedules_search(
+    app: AppHandle,
+    input: finance_tools::ScheduleSearchRequest,
+) -> Result<finance_tools::Page<finance_tools::ScheduleRecord>, String> {
+    let (connection, _) = open_existing_database_read_only(&app)?;
+    finance_tools::search_schedules(&connection, &native_finance_read_actor(), &input)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn finance_recurring_detect(
+    app: AppHandle,
+    input: finance_tools::RecurringDetectRequest,
+) -> Result<finance_tools::RecurringDetectResult, String> {
+    let (connection, _) = open_existing_database_read_only(&app)?;
+    finance_tools::detect_recurring(&connection, &native_finance_read_actor(), &input)
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn categories_data(app: AppHandle) -> Result<Vec<CategoryEntry>, String> {
     let (connection, _) = open_database(&app)?;
@@ -1890,7 +1939,7 @@ fn import_plaid_sandbox(app: AppHandle) -> Result<usize, String> {
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(TradeStationOAuthState::default())
-        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_link_session, complete_plaid_link, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection, save_tradestation_sim_setup_key, tradestation_sim_connection_status, start_tradestation_sim_connection])
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, finance_capabilities_list, finance_transactions_search, finance_schedules_search, finance_recurring_detect, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, import_plaid_sandbox, create_plaid_link_session, complete_plaid_link, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection, save_tradestation_sim_setup_key, tradestation_sim_connection_status, start_tradestation_sim_connection])
         .build(tauri::generate_context!())
         .expect("error while building Money Map Dev");
 
@@ -2213,7 +2262,7 @@ mod plaid_sync_tests {
 #[cfg(not(feature = "sandbox-dev"))]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, create_plaid_link_session, complete_plaid_link, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection])
+        .invoke_handler(tauri::generate_handler![app_capabilities, database_status, recovery_status, export_profile_backup, list_profile_backups, restore_profile_backup, restore_latest_profile_backup, revoke_orphaned_connections, reset_unavailable_database, dashboard_data, create_account, create_transaction, update_transaction, delete_transaction, ledger_data, finance_capabilities_list, finance_transactions_search, finance_schedules_search, finance_recurring_detect, categories_data, create_category, recurring_suggestions, scheduled_data, create_schedule, update_schedule, record_schedule_occurrence, skip_schedule_occurrence, create_plaid_link_session, complete_plaid_link, sync_plaid_connections, plaid_connections_data, disconnect_plaid_connection])
         .run(tauri::generate_context!())
         .expect("error while running Money Map");
 }

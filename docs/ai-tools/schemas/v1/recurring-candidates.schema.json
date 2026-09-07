@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://money-map.local/schemas/ai-tools/v1/recurring-candidates.schema.json",
+  "title": "finance.recurring.detect payload v1",
+  "oneOf": [
+    { "$ref": "#/$defs/Request" },
+    { "$ref": "#/$defs/Result" }
+  ],
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageType", "transactionRefs", "analysisWindow", "page", "extensions"],
+      "properties": {
+        "messageType": { "const": "request" },
+        "transactionRefs": { "type": "array", "items": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" }, "maxItems": 500 },
+        "analysisWindow": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["startDate", "endDate"],
+          "properties": {
+            "startDate": { "type": "string", "format": "date" },
+            "endDate": { "type": "string", "format": "date" }
+          }
+        },
+        "accountRefs": { "type": "array", "items": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" }, "maxItems": 100 },
+        "includePending": { "type": "boolean", "default": false },
+        "minimumConfidence": { "type": "number", "minimum": 0, "maximum": 1, "default": 0 },
+        "page": { "$ref": "capability-envelope.schema.json#/$defs/PageRequest" },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "AmountDistribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "count", "minimumCents", "maximumCents", "medianCents"],
+      "properties": {
+        "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+        "count": { "type": "integer", "minimum": 1 },
+        "minimumCents": { "type": "integer" },
+        "maximumCents": { "type": "integer" },
+        "medianCents": { "type": "integer" },
+        "meanCentsRounded": { "type": "integer" },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "DateDistribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observedDates", "intervalDays", "candidateCadences"],
+      "properties": {
+        "observedDates": { "type": "array", "items": { "type": "string", "format": "date" }, "minItems": 1 },
+        "intervalDays": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
+        "candidateCadences": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["cadence", "confidence"],
+            "properties": {
+              "cadence": { "enum": ["weekly", "biweekly", "semimonthly", "monthly", "quarterly", "semiannual", "annual", "irregular", "unknown"] },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "Candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidateRef", "accountRef", "displayName", "transactionRefs", "amountDistribution", "dateDistribution", "temporalRoles", "matchedScheduleRefs", "confidence", "explanation", "assumptions", "extensions"],
+      "properties": {
+        "candidateRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "accountRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "partyRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "transactionRefs": { "type": "array", "minItems": 1, "items": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" } },
+        "amountDistribution": { "$ref": "#/$defs/AmountDistribution" },
+        "dateDistribution": { "$ref": "#/$defs/DateDistribution" },
+        "temporalRoles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["role", "confidence"],
+            "properties": {
+              "role": { "enum": ["due_date", "planned_date", "autopay_date", "authorized_date", "settlement_date", "unknown"] },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+              "evidence": { "type": "array", "items": { "$ref": "capability-envelope.schema.json#/$defs/EvidenceRef" } }
+            }
+          }
+        },
+        "matchedScheduleRefs": { "type": "array", "items": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" } },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "explanation": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "assumptions": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "Result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageType", "candidates", "pageInfo", "freshness", "extensions"],
+      "properties": {
+        "messageType": { "const": "result" },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/Candidate" } },
+        "pageInfo": { "$ref": "capability-envelope.schema.json#/$defs/PageInfo" },
+        "freshness": { "$ref": "capability-envelope.schema.json#/$defs/Freshness" },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    }
+  }
+}

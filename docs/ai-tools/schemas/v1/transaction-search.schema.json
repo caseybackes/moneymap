@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://money-map.local/schemas/ai-tools/v1/transaction-search.schema.json",
+  "title": "finance.transactions.search payload v1",
+  "oneOf": [
+    { "$ref": "#/$defs/Request" },
+    { "$ref": "#/$defs/Result" }
+  ],
+  "$defs": {
+    "Request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageType", "filters", "page", "extensions"],
+      "properties": {
+        "messageType": { "const": "request" },
+        "filters": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "postedOnOrAfter": { "type": "string", "format": "date" },
+            "postedOnOrBefore": { "type": "string", "format": "date" },
+            "amountCentsMin": { "type": "integer" },
+            "amountCentsMax": { "type": "integer" },
+            "currency": { "type": "string", "pattern": "^[A-Z]{3}$" },
+            "accountRefs": { "type": "array", "items": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" }, "maxItems": 100 },
+            "partyRefs": { "type": "array", "items": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" }, "maxItems": 100 },
+            "text": { "type": "string", "minLength": 1, "maxLength": 300 },
+            "categories": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 100 }, "maxItems": 100 },
+            "sources": { "type": "array", "items": { "enum": ["manual", "provider_sync", "import", "derived"] }, "uniqueItems": true },
+            "pending": { "type": "boolean" },
+            "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+          }
+        },
+        "sort": { "enum": ["posted_on_desc", "posted_on_asc", "amount_desc", "amount_asc"], "default": "posted_on_desc" },
+        "page": { "$ref": "capability-envelope.schema.json#/$defs/PageRequest" },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "Transaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "accountRef", "description", "amount", "postedOn", "pending", "source", "observedAt", "extensions"],
+      "properties": {
+        "ref": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "accountRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "partyRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "description": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "amount": { "$ref": "capability-envelope.schema.json#/$defs/Money" },
+        "postedOn": { "type": "string", "format": "date" },
+        "authorizedOn": { "type": "string", "format": "date" },
+        "pending": { "type": "boolean" },
+        "category": { "type": "string", "maxLength": 100 },
+        "source": { "enum": ["manual", "provider_sync", "import", "derived"] },
+        "observedAt": { "type": "string", "format": "date-time" },
+        "evidence": { "type": "array", "items": { "$ref": "capability-envelope.schema.json#/$defs/EvidenceRef" } },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "Result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageType", "transactions", "pageInfo", "freshness", "extensions"],
+      "properties": {
+        "messageType": { "const": "result" },
+        "transactions": { "type": "array", "items": { "$ref": "#/$defs/Transaction" } },
+        "pageInfo": { "$ref": "capability-envelope.schema.json#/$defs/PageInfo" },
+        "freshness": { "$ref": "capability-envelope.schema.json#/$defs/Freshness" },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    }
+  }
+}

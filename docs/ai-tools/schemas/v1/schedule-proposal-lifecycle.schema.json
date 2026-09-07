@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://money-map.local/schemas/ai-tools/v1/schedule-proposal-lifecycle.schema.json",
+  "title": "Schedule proposal lifecycle v1",
+  "oneOf": [
+    { "$ref": "#/$defs/CreateRequest" },
+    { "$ref": "#/$defs/TransitionRequest" },
+    { "$ref": "#/$defs/LifecycleResult" }
+  ],
+  "$defs": {
+    "State": {
+      "enum": ["proposed", "awaiting_confirmation", "confirmed", "rejected", "expired", "executing", "executed", "conflicted", "failed"]
+    },
+    "Precondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recordRef", "expectedVersion"],
+      "properties": {
+        "recordRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "expectedVersion": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "ScheduleEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "name", "accountRef", "direction", "amount", "amountPolicy", "cadence", "temporalRole", "startDate", "extensions"],
+      "properties": {
+        "operation": { "const": "schedule.create" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "accountRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "partyRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "obligationRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "direction": { "enum": ["inflow", "outflow"] },
+        "amount": { "$ref": "capability-envelope.schema.json#/$defs/Money" },
+        "amountPolicy": { "enum": ["fixed", "estimate", "statement_amount", "variable"] },
+        "cadence": { "enum": ["weekly", "biweekly", "semimonthly", "monthly", "quarterly", "semiannual", "annual", "custom"] },
+        "cadenceExtension": { "type": "object" },
+        "temporalRole": { "enum": ["due_date", "planned_date", "autopay_date", "expected_settlement_date"] },
+        "startDate": { "type": "string", "format": "date" },
+        "endDate": { "type": ["string", "null"], "format": "date" },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "Proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "state", "createdByActorId", "createdAt", "expiresAt", "effect", "effectDigest", "evidence", "assumptions", "preconditions", "idempotencyKey", "requiredConfirmationScope", "extensions"],
+      "properties": {
+        "ref": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "state": { "$ref": "#/$defs/State" },
+        "createdByActorId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "effect": { "$ref": "#/$defs/ScheduleEffect" },
+        "effectDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "evidence": { "type": "array", "minItems": 1, "items": { "$ref": "capability-envelope.schema.json#/$defs/EvidenceRef" } },
+        "assumptions": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+        "preconditions": { "type": "array", "items": { "$ref": "#/$defs/Precondition" } },
+        "idempotencyKey": { "type": "string", "minLength": 8, "maxLength": 200 },
+        "requiredConfirmationScope": { "const": "finance:schedules:confirm" },
+        "decisionRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "resultScheduleRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "ConfirmationArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "proposalRef", "proposalVersion", "profileRef", "actorId", "effectDigest", "confirmedAt", "expiresAt", "extensions"],
+      "properties": {
+        "artifactId": { "type": "string", "minLength": 16, "maxLength": 500 },
+        "proposalRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "proposalVersion": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "profileRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "actorId": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "effectDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "confirmedAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "CreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageType", "action", "effect", "evidence", "assumptions", "preconditions", "expiresAt", "idempotencyKey", "extensions"],
+      "properties": {
+        "messageType": { "const": "request" },
+        "action": { "const": "create" },
+        "effect": { "$ref": "#/$defs/ScheduleEffect" },
+        "evidence": { "type": "array", "minItems": 1, "items": { "$ref": "capability-envelope.schema.json#/$defs/EvidenceRef" } },
+        "assumptions": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+        "preconditions": { "type": "array", "items": { "$ref": "#/$defs/Precondition" } },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "idempotencyKey": { "type": "string", "minLength": 8, "maxLength": 200 },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    },
+    "TransitionRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageType", "action", "proposalRef", "expectedProposalVersion", "idempotencyKey", "extensions"],
+      "properties": {
+        "messageType": { "const": "request" },
+        "action": { "enum": ["get", "reject", "execute_confirmed"] },
+        "proposalRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "expectedProposalVersion": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "confirmationArtifact": { "$ref": "#/$defs/ConfirmationArtifact" },
+        "idempotencyKey": { "type": "string", "minLength": 8, "maxLength": 200 },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "action": { "const": "execute_confirmed" } }, "required": ["action"] },
+          "then": { "required": ["confirmationArtifact"] }
+        },
+        {
+          "if": { "properties": { "action": { "const": "reject" } }, "required": ["action"] },
+          "then": { "required": ["reason"] }
+        }
+      ]
+    },
+    "LifecycleResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["messageType", "proposal", "auditRef", "freshness", "extensions"],
+      "properties": {
+        "messageType": { "const": "result" },
+        "proposal": { "$ref": "#/$defs/Proposal" },
+        "auditRef": { "$ref": "capability-envelope.schema.json#/$defs/RecordRef" },
+        "freshness": { "$ref": "capability-envelope.schema.json#/$defs/Freshness" },
+        "extensions": { "$ref": "capability-envelope.schema.json#/$defs/Extensions" }
+      }
+    }
+  }
+}
