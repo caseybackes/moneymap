@@ -3,6 +3,7 @@ import { CalendarDays, ChartNoAxesCombined, Check, ChevronRight, CircleUserRound
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePlaidLink } from "react-plaid-link";
 import moneyMapIcon from "../src-tauri/icons/money-map-plaid-1024.png";
+import { RecurringReview } from "./RecurringReview";
 import "./category-manager.css";
 import "./shell-layout.css";
 
@@ -13,7 +14,6 @@ type LedgerData = { transactions: LedgerEntry[] };
 type Schedule = { id: string; accountId: string; startDate: string; endDate: string | null; nextOccurrence: string; description: string; amountCents: number; recurrence: string; accountName: string };
 type SandboxLinkSession = { linkToken: string; sessionId: string; sessionSecret: string; expiration: string };
 type Category = { id: string; name: string };
-type RecurringSuggestion = { accountId: string; accountName: string; description: string; amountCents: number; recurrence: string; nextOccurrence: string; occurrences: number };
 type CalendarItem = { id: string; description: string; amountCents: number; scheduled?: boolean };
 type ConnectedInstitution = { id: string; institutionName: string; environment: string; accountCount: number };
 type AppCapabilities = { sandboxEnabled: boolean };
@@ -101,7 +101,6 @@ export function App() {
   const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
   const [editingTransaction, setEditingTransaction] = useState<LedgerEntry | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
-  const [suggestions, setSuggestions] = useState<RecurringSuggestion[]>([]);
   const [syncingAccounts, setSyncingAccounts] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [connections, setConnections] = useState<ConnectedInstitution[]>([]);
@@ -165,7 +164,6 @@ export function App() {
     })();
     return () => { cancelled = true; };
   }, []);
-  useEffect(() => { if (dashboard) { const epoch = storeEpoch.current; void invoke<RecurringSuggestion[]>("recurring_suggestions").then((data) => { if (epoch === storeEpoch.current) setSuggestions(data); }).catch((reason: unknown) => { if (epoch === storeEpoch.current) setError(String(reason)); }); } }, [dashboard]);
   useEffect(() => { const epoch = storeEpoch.current; const report = (reason: unknown) => { if (epoch === storeEpoch.current) setError(String(reason)); }; if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then((data) => { if (epoch === storeEpoch.current) setLedger(data); }).catch(report); if (view === "dashboard" || view === "scheduled" || view === "calendar") void invoke<Schedule[]>("scheduled_data").then((data) => { if (epoch === storeEpoch.current) setSchedules(data); }).catch(report); if (view === "accounts") void invoke<ConnectedInstitution[]>("plaid_connections_data").then((data) => { if (epoch === storeEpoch.current) setConnections(data); }).catch(report); }, [view]);
 
   const netWorth = useMemo(() => dashboard?.accounts.reduce((total, account) => total + account.balanceCents, 0) ?? 0, [dashboard]);
@@ -173,7 +171,6 @@ export function App() {
   const periodIncome = periodTransactions.filter(item => item.amountCents > 0).reduce((sum, item) => sum + item.amountCents, 0);
   const periodSpending = -periodTransactions.filter(item => item.amountCents < 0).reduce((sum, item) => sum + item.amountCents, 0);
   const periodLabel = rangeMonths === null ? "All activity" : rangeMonths === 1 ? "Last month" : rangeMonths === 12 ? "Last year" : `Last ${rangeMonths} months`;
-  async function addSuggestedSchedule(item: RecurringSuggestion) { await invoke("create_schedule", { input: { accountId: item.accountId, startDate: item.nextOccurrence, description: item.description, amountCents: item.amountCents, recurrence: item.recurrence } }); setSuggestions(current => current.filter(candidate => !(candidate.accountId === item.accountId && candidate.description === item.description && candidate.amountCents === item.amountCents))); }
   async function syncConnectedAccounts() { setSyncingAccounts(true); setError(null); setSyncMessage("Refreshing connected accounts…"); try { const result = await synchronizePlaidHistory(attempt => setSyncMessage(`Plaid is preparing transaction history… retry ${attempt} of 20`)); setSyncMessage(result.pendingConnections > 0 ? "Plaid is still preparing transaction history. Retry later or restart Money Map." : result.changed === 0 ? "Up to date." : `Synced ${result.changed} transaction change${result.changed === 1 ? "" : "s"}.`); refresh(); if (view === "ledger" || view === "calendar") void invoke<LedgerData>("ledger_data").then(setLedger); } catch (reason) { setError(String(reason)); } finally { setSyncingAccounts(false); } }
   async function disconnectConnectedAccount(connection: ConnectedInstitution) { setPendingDisconnect({ connection, confirming: false }); }
   async function confirmDisconnect() {
@@ -268,9 +265,7 @@ export function App() {
           </div>
         </Widget>
         {schedules.length > 0 ? <Widget title="Upcoming" className="upcoming-widget" action={<button className="widget-link" onClick={() => setView("scheduled")}>View all <ChevronRight aria-hidden="true" /></button>}><div className="upcoming-list">{[...schedules].sort((left, right) => left.nextOccurrence.localeCompare(right.nextOccurrence)).slice(0, 4).map(item => <div className="upcoming-row" key={item.id}><div><strong>{item.description}</strong><small>{item.nextOccurrence} - {item.accountName} - {item.recurrence}</small></div><strong className={item.amountCents >= 0 ? "positive" : "negative"}>{formatMoney(item.amountCents)}</strong></div>)}</div></Widget> : null}
-        {suggestions.length > 0 ? <Widget title="Recurring suggestions" className="suggestions-widget" action={suggestions.length > 4 ? <span className="widget-count">4 of {suggestions.length}</span> : null}>
-          <div className="suggestion-list">{suggestions.slice(0, 4).map(item => <div className="suggestion-row" key={`${item.accountId}:${item.description}:${item.amountCents}`}><div><strong>{item.description}</strong><small>{item.accountName} · {formatMoney(item.amountCents)} · {item.recurrence} · next {item.nextOccurrence}</small></div><span className="inline-actions"><IconAction label={`Dismiss ${item.description}`} onClick={() => setSuggestions(current => current.filter(candidate => candidate !== item))}><X aria-hidden="true" /></IconAction><IconAction label={`Add ${item.description} to scheduled transactions`} className="emphasized" onClick={() => void addSuggestedSchedule(item)}><Plus aria-hidden="true" /></IconAction></span></div>)}</div>
-        </Widget> : null}
+        <RecurringReview onExecuted={() => { refresh(); void invoke<Schedule[]>("scheduled_data").then(setSchedules); if (ledger) void invoke<LedgerData>("ledger_data").then(setLedger); }} />
       </div> : null}
       {view === "ledger" ? <Ledger transactions={ledger?.transactions ?? []} onEdit={(entry) => { setEditingTransaction(entry); setDialog("transaction"); }} onDeleted={() => { refresh(); void invoke<LedgerData>("ledger_data").then(setLedger); }} /> : null}
       {view === "calendar" ? <Calendar month={calendarMonth} transactions={ledger?.transactions ?? []} schedules={schedules} onMonthChange={setCalendarMonth} /> : null}
