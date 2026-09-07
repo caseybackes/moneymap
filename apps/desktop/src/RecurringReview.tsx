@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { Check, ChevronDown, LoaderCircle, Pencil, Plus, RefreshCw, X } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import dashboardRecurringRequest from "./contracts/dashboard-recurring-request.json";
 import "./recurring-review.css";
 
 type RecordKind = "transaction" | "schedule" | "account" | "category" | "proposal" | "audit" | "profile";
@@ -130,7 +131,7 @@ export function RecurringReview({ onExecuted }: { onExecuted: () => void }) {
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      setResult(await invoke<RecurringDetectResult>("finance_recurring_detect", { input: { accountIds: [], party: null, dateFrom: null, dateTo: null, minimumOccurrences: 2, scanLimit: 500, maximumCandidates: 24 } }));
+      setResult(await invoke<RecurringDetectResult>("finance_recurring_detect", { input: dashboardRecurringRequest }));
     } catch (reason) { setError(explainFailure(reason)); }
     finally { setLoading(false); }
   }, []);

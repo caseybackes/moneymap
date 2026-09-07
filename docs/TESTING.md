@@ -24,6 +24,16 @@ Build the React surface from `apps/desktop`:
 npm run build
 ```
 
+## Coupled-component contracts
+
+Important React → Tauri requests must be exercised as serialized boundary contracts. The UI imports the same versioned JSON payload that the Rust test deserializes and executes through the native implementation; a frontend-only mock is insufficient evidence.
+
+| Boundary | Shared payload | Required result |
+| --- | --- | --- |
+| Dashboard recurring review → native recurring detector | `apps/desktop/src/contracts/dashboard-recurring-request.json` | The exact dashboard request deserializes with native camel-case field names, stays within scan/candidate bounds, executes against the synthetic recurring fixture, and returns no more than the declared maximum. |
+
+ID-124 tracks expanding this coverage across every important UI/native boundary and adding packaged-application E2E release gates on disposable Windows.
+
 Support-report tests seed recognizable canaries as account, transaction, institution, connection, secret, amount, mask, and path values. Serialization must omit every canary while retaining build provenance, schema version, and coarse synchronization state. The report is an allowlist and never ingests `money-map.log`.
 
 Validate the versioned AI capability contracts from the repository root:

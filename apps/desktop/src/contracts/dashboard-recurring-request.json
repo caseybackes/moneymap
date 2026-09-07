@@ -1,0 +1,9 @@
+{
+  "accountIds": [],
+  "party": null,
+  "dateFrom": null,
+  "dateTo": null,
+  "minimumOccurrences": 2,
+  "scanLimit": 500,
+  "maximumCandidates": 20
+}

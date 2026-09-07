@@ -1109,6 +1109,22 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_recurring_request_contract_executes_against_native_bounds() {
+        let request: RecurringDetectRequest = serde_json::from_str(include_str!(
+            "../../src/contracts/dashboard-recurring-request.json"
+        )).expect("dashboard recurring request must deserialize through the native command contract");
+        assert_eq!(request.scan_limit, Some(MAX_RECURRING_SCAN));
+        assert_eq!(request.maximum_candidates, Some(MAX_RECURRING_CANDIDATES));
+
+        let result = detect_recurring(
+            &versioned_recurring_fixture(),
+            &actor(vec![RecordScope::RecurringAnalysis, RecordScope::Schedules]),
+            &request,
+        ).expect("the exact dashboard payload must pass native validation and execute");
+        assert!(result.candidates.len() <= MAX_RECURRING_CANDIDATES as usize);
+    }
+
+    #[test]
     fn recurring_student_loan_candidate_cites_evidence_and_matches_schedule() {
         let connection = database();
         add_student_loan_fixture(&connection);
