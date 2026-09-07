@@ -8,7 +8,7 @@ Money Map uses semantic versioning: `MAJOR.MINOR.PATCH`.
 - **MINOR**: backward-compatible functionality.
 - **PATCH**: backward-compatible fixes and visual corrections.
 
-`0.1.0` is the current pre-1.0 baseline. `apps/desktop/src-tauri/tauri.conf.json` is the sole source of truth. Before either publish build, `scripts/sync-tauri-version.ps1` validates that value and synchronizes the required package metadata:
+`0.2.0` is the current pre-1.0 family-beta packaging baseline. `apps/desktop/src-tauri/tauri.conf.json` is the sole source of truth. Before either publish build, `scripts/sync-tauri-version.ps1` validates that value and synchronizes the required package metadata:
 
 - `apps/desktop/package.json`
 - `apps/desktop/src-tauri/tauri.conf.json`
@@ -21,7 +21,7 @@ The Tauri value is compiled into the executable and is the authoritative runtime
 | Channel | Command | Output | Data identity |
 | --- | --- | --- | --- |
 | Development / Sandbox | `.\\scripts\\publish-tauri-dev.ps1` | `artifacts\\windows\\dev\\MoneyMapDev.exe` | `com.caseybackes.moneymap.dev` |
-| Production | `.\\scripts\\publish-tauri-prod.ps1` | `artifacts\\windows\\release\\MoneyMap.exe` | `com.caseybackes.moneymap` |
+| Production | `.\\scripts\\publish-tauri-prod.ps1` | `artifacts\\windows\\release\\MoneyMap.exe`, `MoneyMap-<version>-setup.exe`, and `release-manifest.json` | `com.caseybackes.moneymap` |
 
 The development executable includes only Sandbox account-connection handlers. The production executable excludes those handlers.
 
@@ -32,6 +32,14 @@ Linux uses the same application source but has no packaging or runtime-validatio
 Generated executables, PDBs, local databases, and credentials do not go in Git. Each public application build should be attached to a GitHub Release tagged as `vMAJOR.MINOR.PATCH`, after clean-build and smoke-test evidence is recorded.
 
 Run `node .\scripts\verify-public-release.mjs` before every push and publish. The gate scans the complete reachable Git history and visible working tree for forbidden financial exports, databases, credentials, private-key material, generated artifacts, and unexplained blobs over 5 MiB. It reports finding classes and paths without printing matched values. It also requires each tracked financial fixture to declare itself synthetic and carry a verified SHA-256 manifest.
+
+The Production NSIS installer is current-user scoped and does not require administrator access for the Money Map installation. It keeps the stable Production application identifier across upgrades, creates normal Start Menu and uninstall entries, blocks downgrades, and embeds Microsoft's WebView2 bootstrapper so a missing runtime can be installed with visible status. The installer and uninstaller own application files only; profile databases, Windows Credential Manager records, backups, and pre-restore archives remain outside the installation directory and are preserved.
+
+Every Production publish emits `release-manifest.json` with the semantic version, exact source revision, build epoch, artifact byte sizes, and SHA-256 hashes. Use [WINDOWS-INSTALLER-VALIDATION.md](WINDOWS-INSTALLER-VALIDATION.md) to qualify a build on a clean Windows environment before family distribution.
+
+Production publishing requires a clean Git worktree and an unlocked destination `MoneyMap.exe`; this prevents a new artifact from claiming the wrong source revision and prevents overwriting an executable that is running. After publishing, run `.\scripts\verify-windows-release.ps1` to recompute every recorded hash and verify the executable version. Installer signing remains part of the signed-update work and is required before remote family distribution.
+
+For isolated build validation while the current portable Production app is running, pass a separate ignored artifact directory with `-ReleaseDirectory`; the default remains `artifacts\windows\release`.
 
 Install the repository-managed pre-push hook once per clone:
 

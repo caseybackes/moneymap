@@ -1,6 +1,6 @@
 [package]
 name = "money-map-desktop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first household finance desktop application"
 authors = ["Casey Backes"]
 edition = "2021"

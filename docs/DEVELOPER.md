@@ -35,7 +35,7 @@ Build fixed development and release artifacts with:
 .\scripts\publish-tauri-prod.ps1
 ```
 
-Do not create timestamped artifact folders. The development executable is always replaced at `artifacts\windows\dev\MoneyMapDev.exe`; the production executable is always replaced at `artifacts\windows\release\MoneyMap.exe`.
+Do not create timestamped artifact folders. The development executable is always replaced at `artifacts\windows\dev\MoneyMapDev.exe`. A Production publish replaces `artifacts\windows\release\MoneyMap.exe`, writes `MoneyMap-<version>-setup.exe`, and records both hashes in `release-manifest.json`.
 
 ## Current boundaries
 
